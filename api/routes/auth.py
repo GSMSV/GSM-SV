@@ -1,5 +1,4 @@
 import json
-import re
 import time
 from datetime import timedelta
 from pathlib import Path
@@ -17,13 +16,11 @@ from fastapi import (
 from sqlalchemy.exc import IntegrityError
 from fastapi.responses import JSONResponse
 from fastapi.security import OAuth2PasswordRequestForm
-from pydantic import BaseModel as _BM
 from sqlalchemy.orm import Session
 from jose import jwt, JWTError
 from core.database import get_db
 from core.config import settings
 from core.security import (
-    MAX_PASSWORD_BYTES,
     create_access_token,
     create_refresh_token,
     get_password_hash,
@@ -42,6 +39,7 @@ from schemas.user_schema import (
     ProjectSignupRequest,
     PasswordResetRequest,
     PasswordResetConfirm,
+    ChangePasswordRequest,
 )
 from services.email_service import generate_verification_code, send_verification_email
 from services.datagsm_service import lookup_student_by_email, lookup_projects_by_email
@@ -795,12 +793,6 @@ async def confirm_password_reset(
         db.commit()
         raise HTTPException(status_code=400, detail="인증 코드가 일치하지 않습니다.")
 
-    if len(body.new_password.encode("utf-8")) > MAX_PASSWORD_BYTES:
-        raise HTTPException(
-            status_code=400,
-            detail=f"비밀번호가 너무 깁니다. UTF-8 기준 {MAX_PASSWORD_BYTES}바이트 이하여야 합니다.",
-        )
-
     # 해당 이메일+role의 활성 계정만 비밀번호 변경
     user = (
         db.query(User)
@@ -824,11 +816,6 @@ async def confirm_password_reset(
 # ── 비밀번호 변경 (로그인 상태) ─────────────────────────────
 
 
-class ChangePasswordRequest(_BM):
-    current_password: str
-    new_password: str
-
-
 @router.put("/change-password")
 async def change_password(
     body: ChangePasswordRequest,
@@ -848,21 +835,6 @@ async def change_password(
     if not verify_password(body.current_password, current_user.hashed_password):
         raise HTTPException(
             status_code=400, detail="현재 비밀번호가 일치하지 않습니다."
-        )
-
-    _pw_pat = re.compile(
-        r'^(?=.*[a-zA-Z])(?=.*\d)(?=.*[!@#$%^&*()_+\-=\[\]{}|;:\'",.<>?/~`]).{8,}$'
-    )
-    if not _pw_pat.match(body.new_password):
-        raise HTTPException(
-            status_code=400,
-            detail="비밀번호는 8자 이상, 영문+숫자+특수기호를 포함해야 합니다.",
-        )
-
-    if len(body.new_password.encode("utf-8")) > MAX_PASSWORD_BYTES:
-        raise HTTPException(
-            status_code=400,
-            detail=f"비밀번호가 너무 깁니다. UTF-8 기준 {MAX_PASSWORD_BYTES}바이트 이하여야 합니다.",
         )
 
     current_user.hashed_password = get_password_hash(body.new_password)

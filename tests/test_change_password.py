@@ -101,8 +101,8 @@ class TestChangePassword:
             json={"current_password": "OldPass1!", "new_password": "weak"},
             cookies=_auth_cookie(user.id),
         )
-        assert res.status_code == 400
-        assert "8자" in res.json()["detail"]
+        assert res.status_code == 422
+        assert "8자" in res.text
 
     def test_oauth_user_blocked(self, client, db):
         user = _make_user(db, oauth=True)
@@ -122,7 +122,7 @@ class TestChangePassword:
         assert res.status_code == 401
 
     def test_long_ascii_password_72plus(self, client, db):
-        """72바이트 초과 ASCII 비밀번호 → 400."""
+        """72바이트 초과 ASCII 비밀번호 → 422."""
         user = _make_user(db, password="OldPass1!")
         long_pw = "Aa1!" + "x" * 70  # 74 bytes
         res = client.put(
@@ -130,11 +130,11 @@ class TestChangePassword:
             json={"current_password": "OldPass1!", "new_password": long_pw},
             cookies=_auth_cookie(user.id),
         )
-        assert res.status_code == 400, res.text
-        assert "72바이트" in res.json()["detail"]
+        assert res.status_code == 422, res.text
+        assert "72바이트" in res.text
 
     def test_unicode_password_long_bytes(self, client, db):
-        """한글 포함 + 72바이트 초과 비밀번호 → 400."""
+        """한글 포함 + 72바이트 초과 비밀번호 → 422."""
         user = _make_user(db, password="OldPass1!")
         unicode_pw = "Aa1!" + "한" * 30  # 4 + 90 = 94 bytes
         res = client.put(
@@ -142,8 +142,8 @@ class TestChangePassword:
             json={"current_password": "OldPass1!", "new_password": unicode_pw},
             cookies=_auth_cookie(user.id),
         )
-        assert res.status_code == 400
-        assert "72바이트" in res.json()["detail"]
+        assert res.status_code == 422
+        assert "72바이트" in res.text
 
     def test_dual_role_account_isolated_on_change(self, client, db):
         """USER+PROJECT_OWNER 듀얼 계정은 별개로 취급 — PO에서 변경해도 USER는 그대로."""

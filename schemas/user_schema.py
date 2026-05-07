@@ -1,6 +1,8 @@
 import re
 from pydantic import BaseModel, EmailStr, field_validator
 
+from core.security import MAX_PASSWORD_BYTES
+
 _PW_PATTERN = re.compile(
     r'^(?=.*[a-zA-Z])(?=.*\d)(?=.*[!@#$%^&*()_+\-=\[\]{}|;:\'",.<>?/~`]).{8,}$'
 )
@@ -10,6 +12,10 @@ _PW_MSG = "비밀번호는 8자 이상, 영문+숫자+특수기호를 포함해�
 def _validate_pw(v: str) -> str:
     if not _PW_PATTERN.match(v):
         raise ValueError(_PW_MSG)
+    if len(v.encode("utf-8")) > MAX_PASSWORD_BYTES:
+        raise ValueError(
+            f"비밀번호가 너무 깁니다. UTF-8 기준 {MAX_PASSWORD_BYTES}바이트 이하여야 합니다."
+        )
     return v
 
 
@@ -108,3 +114,15 @@ class PasswordResetConfirm(BaseModel):
         if v not in _RESET_ROLES:
             raise ValueError("login_role은 user 또는 project_owner여야 합니다.")
         return v
+
+
+class ChangePasswordRequest(BaseModel):
+    """로그인 상태 비밀번호 변경 요청"""
+
+    current_password: str
+    new_password: str
+
+    @field_validator("new_password")
+    @classmethod
+    def validate_password(cls, v):
+        return _validate_pw(v)
