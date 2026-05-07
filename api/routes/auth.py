@@ -23,10 +23,11 @@ from jose import jwt, JWTError
 from core.database import get_db
 from core.config import settings
 from core.security import (
-    verify_password,
+    MAX_PASSWORD_BYTES,
     create_access_token,
     create_refresh_token,
     get_password_hash,
+    verify_password,
 )
 from models.user import User, UserRole
 from models.email_verification import EmailVerification
@@ -794,10 +795,10 @@ async def confirm_password_reset(
         db.commit()
         raise HTTPException(status_code=400, detail="인증 코드가 일치하지 않습니다.")
 
-    if len(body.new_password.encode("utf-8")) > 72:
+    if len(body.new_password.encode("utf-8")) > MAX_PASSWORD_BYTES:
         raise HTTPException(
             status_code=400,
-            detail="비밀번호가 너무 깁니다. UTF-8 기준 72바이트 이하여야 합니다.",
+            detail=f"비밀번호가 너무 깁니다. UTF-8 기준 {MAX_PASSWORD_BYTES}바이트 이하여야 합니다.",
         )
 
     # 해당 이메일+role의 활성 계정만 비밀번호 변경
@@ -858,10 +859,10 @@ async def change_password(
             detail="비밀번호는 8자 이상, 영문+숫자+특수기호를 포함해야 합니다.",
         )
 
-    if len(body.new_password.encode("utf-8")) > 72:
+    if len(body.new_password.encode("utf-8")) > MAX_PASSWORD_BYTES:
         raise HTTPException(
             status_code=400,
-            detail="비밀번호가 너무 깁니다. UTF-8 기준 72바이트 이하여야 합니다.",
+            detail=f"비밀번호가 너무 깁니다. UTF-8 기준 {MAX_PASSWORD_BYTES}바이트 이하여야 합니다.",
         )
 
     current_user.hashed_password = get_password_hash(body.new_password)
