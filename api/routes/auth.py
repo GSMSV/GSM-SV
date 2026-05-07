@@ -5,6 +5,7 @@ from datetime import timedelta
 from pathlib import Path
 from core.timezone import now_kst
 from fastapi import APIRouter, Depends, HTTPException, status, Query, Request, UploadFile, File
+from sqlalchemy.exc import IntegrityError
 from fastapi.responses import JSONResponse
 from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel as _BM
@@ -316,10 +317,7 @@ async def verify_email(request: Request, body: VerifyCodeRequest, db: Session = 
     if existing:
         raise HTTPException(status_code=400, detail="이미 가입된 계정입니다.")
 
-    record.verified = True
-    db.commit()
-
-    # 학생 정보 복원
+    # 학생 정보 복원 (삭제 전에 읽기)
     student_info = {}
     if record.student_info:
         try:
@@ -340,8 +338,13 @@ async def verify_email(request: Request, body: VerifyCodeRequest, db: Session = 
         project_name=record.project_name if is_project_owner else None,
         project_reason=record.project_reason if is_project_owner else None,
     )
-    db.add(new_user)
-    db.commit()
+    try:
+        db.delete(record)
+        db.add(new_user)
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=400, detail="이미 가입된 계정입니다.")
     db.refresh(new_user)
 
     if is_project_owner:
@@ -442,7 +445,7 @@ async def reject_project_owner(
 @limiter.limit("3/minute")
 async def resend_code(request: Request, body: ResendCodeRequest, db: Session = Depends(get_db)):
     """인증 코드를 재발송합니다."""
-    record = (
+    latest = (
         db.query(EmailVerification)
         .filter(
             EmailVerification.email == body.email,
@@ -452,13 +455,39 @@ async def resend_code(request: Request, body: ResendCodeRequest, db: Session = D
         .first()
     )
 
-    if not record:
+    if not latest:
         raise HTTPException(status_code=400, detail="인증 대기 중인 요청이 없습니다.")
 
+    # 기존 미인증 레코드를 모두 삭제하고 새 레코드 삽입
+    signup_role = latest.signup_role
+    hashed_password = latest.hashed_password
+    student_info = latest.student_info
+    project_name = latest.project_name
+    project_reason = latest.project_reason
+
+    db.query(EmailVerification).filter(
+        EmailVerification.email == body.email,
+        EmailVerification.verified == False,
+        EmailVerification.signup_role == signup_role,
+    ).delete(synchronize_session="fetch")
+
     new_code = generate_verification_code()
-    record.code = new_code
-    record.expires_at = now_kst() + timedelta(minutes=settings.VERIFICATION_CODE_EXPIRE_MINUTES)
-    db.commit()
+    new_record = EmailVerification(
+        email=body.email,
+        hashed_password=hashed_password,
+        code=new_code,
+        student_info=student_info,
+        signup_role=signup_role,
+        project_name=project_name,
+        project_reason=project_reason,
+        expires_at=now_kst() + timedelta(minutes=settings.VERIFICATION_CODE_EXPIRE_MINUTES),
+    )
+    try:
+        db.add(new_record)
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=400, detail="잠시 후 다시 시도해주세요.")
 
     sent = await send_verification_email(body.email, new_code)
     if not sent:
@@ -629,6 +658,7 @@ async def confirm_password_reset(request: Request, body: PasswordResetConfirm, d
             EmailVerification.verified == False,
         )
         .order_by(EmailVerification.created_at.desc())
+        .with_for_update()  # request_password_reset이 삭제 후 재생성하므로 단일 레코드 보장
         .first()
     )
 
@@ -638,10 +668,17 @@ async def confirm_password_reset(request: Request, body: PasswordResetConfirm, d
     if now_kst() > record.expires_at:
         raise HTTPException(status_code=400, detail="인증 코드가 만료되었습니다. 다시 요청해주세요.")
 
-    if record.code != body.code.strip():
-        raise HTTPException(status_code=400, detail="인증 코드가 일치하지 않습니다.")
+    if (record.attempts or 0) >= 5:
+        raise HTTPException(
+            status_code=429,
+            detail="인증 시도 횟수를 초과했습니다. 새 코드를 요청해주세요.",
+            headers={"Retry-After": "0"},
+        )
 
-    record.verified = True
+    if record.code != body.code.strip():
+        record.attempts = (record.attempts or 0) + 1
+        db.commit()
+        raise HTTPException(status_code=400, detail="인증 코드가 일치하지 않습니다.")
 
     # 해당 이메일의 모든 활성 계정 비밀번호 변경
     users = db.query(User).filter(User.email == body.email, User.is_active == True).all()
@@ -652,6 +689,7 @@ async def confirm_password_reset(request: Request, body: PasswordResetConfirm, d
     for user in users:
         user.hashed_password = new_hash
 
+    db.delete(record)
     db.commit()
 
     return {"message": "비밀번호가 성공적으로 변경되었습니다."}

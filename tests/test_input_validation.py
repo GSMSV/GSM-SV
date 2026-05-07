@@ -6,37 +6,44 @@ Domain 3: 입력 검증 & 스키마 테스트 (VAL-TC-01 ~ VAL-TC-12)
 import pytest
 from pydantic import ValidationError
 
-from schemas.vm_schema import VMAction, VMActionType
+from schemas.vm_schema import VMAction, VMActionType, SnapshotCreateRequest
 from schemas.fw_schema import FirewallRule
 
 
 # ── VAL-TC-01/02: 스냅샷 이름 검증 ──────────────────────────
 
 class TestSnapshotNameValidation:
-    """스냅샷 이름 정규식 검증 (vmcontrol.py에서 사용하는 패턴)"""
-
-    import re
-    SNAP_PATTERN = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9_-]*$')
+    """SnapshotCreateRequest 스키마 기반 스냅샷 이름 검증"""
 
     def test_korean_name_rejected(self):
         """VAL-TC-01: 한글 스냅샷 이름 거부"""
-        assert not self.SNAP_PATTERN.match("테스트스냅샷")
+        with pytest.raises(ValidationError):
+            SnapshotCreateRequest(name="테스트스냅샷")
 
     def test_valid_name_accepted(self):
         """VAL-TC-02: 정상 스냅샷 이름 통과"""
-        assert self.SNAP_PATTERN.match("valid-snap_1")
+        req = SnapshotCreateRequest(name="valid-snap")
+        assert req.name == "valid-snap"
 
     def test_path_traversal_rejected(self):
         """VAL-TC-03: 경로 순회 공격 거부"""
-        assert not self.SNAP_PATTERN.match("../../../etc/passwd")
+        with pytest.raises(ValidationError):
+            SnapshotCreateRequest(name="../../../etc/passwd")
 
     def test_dash_start_rejected(self):
         """대시로 시작 거부"""
-        assert not self.SNAP_PATTERN.match("-invalid")
+        with pytest.raises(ValidationError):
+            SnapshotCreateRequest(name="-invalid")
+
+    def test_number_start_rejected(self):
+        """숫자로 시작 거부 — Proxmox 식별자 규칙"""
+        with pytest.raises(ValidationError):
+            SnapshotCreateRequest(name="1snap")
 
     def test_auto_daily_prefix_accepted(self):
         """auto-daily 프리픽스 통과"""
-        assert self.SNAP_PATTERN.match("auto-daily-20260409")
+        req = SnapshotCreateRequest(name="auto-daily-20260409")
+        assert req.name == "auto-daily-20260409"
 
 
 # ── VAL-TC-04/05: VMAction Enum 검증 ─────────────────────────

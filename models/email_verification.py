@@ -18,4 +18,4 @@ class EmailVerification(Base):
     created_at = Column(DateTime(timezone=True), default=now_kst)
     expires_at = Column(DateTime(timezone=True), nullable=False)
     verified = Column(Boolean, default=False)
-    attempts = Column(Integer, default=0)
+    attempts = Column(Integer, server_default="0", default=0, nullable=False)

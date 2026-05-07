@@ -40,8 +40,9 @@ docker-compose.yml
 frontend/.dockerignore
 nginx/
 
-# Claude
-.claude/
-CLAUDE.md
+# Claude (개인 설정만 제외, 팀 공통 설정은 추적)
+.claude/settings.local.json
+.claude/worktrees/
+.claude/launch.json
 
 /docs/

@@ -1,12 +1,11 @@
 import asyncio
 import base64
 import logging
-import re
 from datetime import timedelta
 from core.timezone import now_kst
 from fastapi import APIRouter, HTTPException, status, Depends, Request
 from sqlalchemy.orm import Session
-from schemas.vm_schema import VMAction, VMCreate, VMResize
+from schemas.vm_schema import VMAction, VMCreate, VMResize, SnapshotCreateRequest
 from services.proxmox_client import get_proxmox_for_server
 from models.server import Server
 from services.vm_service import create_vm, delete_vm
@@ -488,7 +487,7 @@ async def list_snapshots(
 async def create_snapshot(
     node: str,
     vmid: int,
-    body: dict,
+    body: SnapshotCreateRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -497,13 +496,7 @@ async def create_snapshot(
     node = vm_record.server.name
     proxmox = get_proxmox_for_server(vm_record.server)
 
-    snap_name = body.get("name", "").strip()
-    if not snap_name:
-        raise HTTPException(status_code=400, detail="스냅샷 이름을 입력해주세요.")
-    if len(snap_name) > 40:
-        raise HTTPException(status_code=400, detail="스냅샷 이름은 40자 이내로 입력해주세요.")
-    if not re.match(r'^[a-zA-Z0-9가-힣_-]+$', snap_name):
-        raise HTTPException(status_code=400, detail="스냅샷 이름은 영문, 숫자, 한글, _, -만 사용할 수 있습니다.")
+    snap_name = body.name
 
     try:
         existing = proxmox.nodes(node).qemu(vmid).snapshot.get()
@@ -516,7 +509,7 @@ async def create_snapshot(
 
         result = proxmox.nodes(node).qemu(vmid).snapshot.post(
             snapname=snap_name,
-            description=body.get("description", ""),
+            description=body.description or "",
             vmstate=0,  # RAM 상태 저장 안 함 (디스크만)
         )
         return {"success": True, "message": f"스냅샷 '{snap_name}'이(가) 생성되었습니다.", "task": result}
