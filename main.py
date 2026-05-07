@@ -20,6 +20,7 @@ from api.routes import (
     oauth,
     faq,
 )
+from api.routes.oauth import validate_oauth_store_mode
 from core.config import settings
 from sqlalchemy.orm import joinedload
 from core.database import Base, engine, SessionLocal
@@ -311,6 +312,7 @@ async def _oauth_store_cleanup_loop():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # ── 시작 시 ──
+    validate_oauth_store_mode()
     Base.metadata.create_all(bind=engine)  # 테이블 자동 생성
     sync_servers()  # .env → servers 테이블 동기화
 

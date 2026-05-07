@@ -49,6 +49,8 @@ class Settings(BaseSettings):
     DATAGSM_USERINFO_URL: str = "https://oauth-userinfo.data.hellogsm.kr"
     OAUTH_REDIRECT_URI: str = "http://localhost:3000/api/v1/oauth/callback"
     FRONTEND_URL: str = "http://localhost:3000"
+    OAUTH_STORE_MODE: str = "memory"               # memory | redis
+    WEB_CONCURRENCY: int = 1
 
     # 프로젝트 오너 전용 설정
     PROJECT_NODE_NAME: str = "gsmgpu3"            # 프로젝트 VM 전용 노드

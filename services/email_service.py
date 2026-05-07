@@ -2,11 +2,14 @@
 이메일 발송 서비스 — SMTP를 통해 인증 코드를 전송합니다.
 """
 
+import logging
 import secrets
 import string
 import aiosmtplib
 from email.message import EmailMessage
 from core.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 def generate_verification_code() -> str:
@@ -49,7 +52,9 @@ async def send_verification_email(to_email: str, code: str) -> bool:
     </div>
     """
 
-    msg.set_content(f"GSM SV 인증 코드: {code}\n이 코드는 {settings.VERIFICATION_CODE_EXPIRE_MINUTES}분 후 만료됩니다.")
+    msg.set_content(
+        f"GSM SV 인증 코드: {code}\n이 코드는 {settings.VERIFICATION_CODE_EXPIRE_MINUTES}분 후 만료됩니다."
+    )
     msg.add_alternative(html_body, subtype="html")
 
     try:
@@ -63,5 +68,7 @@ async def send_verification_email(to_email: str, code: str) -> bool:
         )
         return True
     except Exception as e:
-        print(f"[이메일 발송 실패] {to_email}: {e}")
+        logger.error(
+            "[이메일 발송 실패] %s: %s", to_email[:3] + "***", e, exc_info=True
+        )
         return False

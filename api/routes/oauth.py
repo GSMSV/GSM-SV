@@ -2,12 +2,14 @@
 DataGSM OAuth 2.0 + PKCE 인증 라우트
 흐름: authorize → DataGSM 로그인 → callback → 임시코드 발급 → POST /exchange → JWT 발급
 """
+
 import hashlib
 import base64
 import secrets
 import time
 import httpx
 import logging
+from urllib.parse import urlencode
 
 from fastapi import APIRouter, HTTPException, Query, Depends, Request
 from fastapi.responses import RedirectResponse, JSONResponse
@@ -26,15 +28,27 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 # 임시 저장소 (프로덕션에서는 Redis 사용 권장)
-_pkce_store: dict[str, str] = {}         # state → code_verifier
-_token_store: dict[str, dict] = {}       # temp_code → {access, refresh, expires}
+_pkce_store: dict[str, tuple[str, float]] = {}  # state → (code_verifier, expires_at)
+_token_store: dict[str, dict] = {}  # temp_code → {access, refresh, expires}
 _STORE_TTL = 300  # 5분
+
+
+def validate_oauth_store_mode():
+    if settings.OAUTH_STORE_MODE == "memory" and settings.WEB_CONCURRENCY > 1:
+        logger.error(
+            "[OAuth] memory store is not shared across multi-workers. Set OAUTH_STORE_MODE=redis or WEB_CONCURRENCY=1."
+        )
+        raise RuntimeError(
+            "OAuth memory store cannot be used with multi-workers. Configure redis store mode or set WEB_CONCURRENCY=1."
+        )
 
 
 def _cleanup_stores():
     """만료된 항목 정리"""
     now = time.time()
-    expired_pkce = [k for k, v in _pkce_store.items() if isinstance(v, tuple) and v[1] < now]
+    expired_pkce = [
+        k for k, v in _pkce_store.items() if isinstance(v, tuple) and v[1] < now
+    ]
     for k in expired_pkce:
         _pkce_store.pop(k, None)
     expired_tokens = [k for k, v in _token_store.items() if v.get("expires", 0) < now]
@@ -45,9 +59,11 @@ def _cleanup_stores():
 def _generate_pkce() -> tuple[str, str]:
     """PKCE code_verifier / code_challenge 생성"""
     verifier = base64.urlsafe_b64encode(secrets.token_bytes(32)).rstrip(b"=").decode()
-    challenge = base64.urlsafe_b64encode(
-        hashlib.sha256(verifier.encode()).digest()
-    ).rstrip(b"=").decode()
+    challenge = (
+        base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest())
+        .rstrip(b"=")
+        .decode()
+    )
     return verifier, challenge
 
 
@@ -61,7 +77,9 @@ async def oauth_authorize(request: Request):
     # state → (verifier, 만료시간) 저장
     _cleanup_stores()
     if len(_pkce_store) > 1000:
-        raise HTTPException(status_code=503, detail="서버가 바쁩니다. 잠시 후 다시 시도해주세요.")
+        raise HTTPException(
+            status_code=503, detail="서버가 바쁩니다. 잠시 후 다시 시도해주세요."
+        )
     _pkce_store[state] = (verifier, time.time() + _STORE_TTL)
 
     params = {
@@ -72,7 +90,7 @@ async def oauth_authorize(request: Request):
         "code_challenge": challenge,
         "code_challenge_method": "S256",
     }
-    query = "&".join(f"{k}={v}" for k, v in params.items())
+    query = urlencode(params)
     return RedirectResponse(f"{settings.DATAGSM_OAUTH_URL}/v1/oauth/authorize?{query}")
 
 
@@ -87,10 +105,15 @@ async def oauth_callback(
     # 1. PKCE verifier 꺼내기
     entry = _pkce_store.pop(state, None)
     if not entry or (isinstance(entry, tuple) and entry[1] < time.time()):
-        raise HTTPException(status_code=400, detail="유효하지 않거나 만료된 state입니다. 다시 로그인해주세요.")
+        raise HTTPException(
+            status_code=400,
+            detail="유효하지 않거나 만료된 state입니다. 다시 로그인해주세요.",
+        )
     verifier = entry[0] if isinstance(entry, tuple) else entry
     if not verifier:
-        raise HTTPException(status_code=400, detail="유효하지 않은 state입니다. 다시 로그인해주세요.")
+        raise HTTPException(
+            status_code=400, detail="유효하지 않은 state입니다. 다시 로그인해주세요."
+        )
 
     async with httpx.AsyncClient(timeout=30) as client:
         # 2. Authorization Code → Access Token 교환
@@ -107,7 +130,16 @@ async def oauth_callback(
         )
 
         if token_res.status_code != 200:
-            logger.error(f"[OAuth] 토큰 교환 실패: {token_res.text}")
+            try:
+                err = token_res.json()
+            except ValueError:
+                err = {}
+            logger.error(
+                "[OAuth] 토큰 교환 실패: status=%s error=%s description=%s",
+                token_res.status_code,
+                err.get("error"),
+                err.get("error_description"),
+            )
             raise HTTPException(status_code=400, detail="토큰 교환에 실패했습니다.")
 
         token_data = token_res.json()
@@ -121,8 +153,18 @@ async def oauth_callback(
         )
 
         if userinfo_res.status_code != 200:
-            logger.error(f"[OAuth] UserInfo 조회 실패: {userinfo_res.text}")
-            raise HTTPException(status_code=400, detail="사용자 정보 조회에 실패했습니다.")
+            try:
+                err = userinfo_res.json()
+            except ValueError:
+                err = {}
+            logger.error(
+                "[OAuth] UserInfo 조회 실패: status=%s error=%s",
+                userinfo_res.status_code,
+                err.get("error"),
+            )
+            raise HTTPException(
+                status_code=400, detail="사용자 정보 조회에 실패했습니다."
+            )
 
         userinfo_raw = userinfo_res.json()
         userinfo = userinfo_raw.get("data", userinfo_raw)
@@ -140,10 +182,16 @@ async def oauth_callback(
         raise HTTPException(status_code=400, detail="이메일 정보를 가져올 수 없습니다.")
 
     # 5. 기존 유저 매칭 (이메일 기준)
-    user = db.query(User).filter(
-        User.email == email,
-        User.role == UserRole.USER,
-    ).first()
+    # 복합 유니크 제약(email, role)으로 동일 이메일에 여러 역할 계정이 존재할 수 있으므로
+    # 관리자/오너 계정 존재 여부를 먼저 명시적으로 차단
+    if db.query(User).filter(User.email == email, User.role != UserRole.USER).first():
+        raise HTTPException(
+            status_code=409,
+            detail="해당 이메일은 다른 권한 계정으로 이미 존재합니다.",
+        )
+    user = (
+        db.query(User).filter(User.email == email, User.role == UserRole.USER).first()
+    )
 
     if user:
         # 기존 계정에 OAuth 연결
@@ -209,7 +257,9 @@ async def exchange_temp_code(body: TokenExchangeRequest):
     """임시 코드를 JWT 토큰으로 교환 (1회용) — httpOnly 쿠키에 설정"""
     entry = _token_store.pop(body.code, None)
     if not entry or entry["expires"] < time.time():
-        raise HTTPException(status_code=400, detail="유효하지 않거나 만료된 코드입니다.")
+        raise HTTPException(
+            status_code=400, detail="유효하지 않거나 만료된 코드입니다."
+        )
 
     is_prod = settings.FRONTEND_URL.startswith("https")
     response = JSONResponse(content={"message": "ok"})
@@ -232,4 +282,3 @@ async def exchange_temp_code(body: TokenExchangeRequest):
         path="/api/v1/auth/refresh",
     )
     return response
-    
