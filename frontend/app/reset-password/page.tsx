@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useRef, useEffect } from "react"
-import { requestPasswordReset, confirmPasswordReset, ApiError } from "@/lib/api"
+import { requestPasswordReset, confirmPasswordReset, ApiError, type ResetRole } from "@/lib/api"
 import Link from "next/link"
 import {
   KeyRound, Loader2, Check, Eye, EyeOff, ArrowLeft, RotateCw, Sun, Moon,
@@ -23,6 +23,7 @@ export default function ResetPasswordPage() {
 
   const [step, setStep] = useState<Step>("email")
   const [email, setEmail] = useState("")
+  const [loginRole, setLoginRole] = useState<ResetRole>("user")
   const [emailLoading, setEmailLoading] = useState(false)
 
   // Step 2
@@ -59,7 +60,7 @@ export default function ResetPasswordPage() {
     setError("")
     setEmailLoading(true)
     try {
-      await requestPasswordReset(email)
+      await requestPasswordReset(email, loginRole)
       setStep("code")
       setResendCooldown(60)
       setTimeout(() => inputRefs.current[0]?.focus(), 100)
@@ -112,7 +113,7 @@ export default function ResetPasswordPage() {
     setResending(true)
     setError("")
     try {
-      await requestPasswordReset(email)
+      await requestPasswordReset(email, loginRole)
       setResendCooldown(60)
       setCode(["", "", "", "", "", ""])
       inputRefs.current[0]?.focus()
@@ -148,7 +149,7 @@ export default function ResetPasswordPage() {
 
     setSubmitLoading(true)
     try {
-      await confirmPasswordReset(email, fullCode, newPassword)
+      await confirmPasswordReset(email, fullCode, newPassword, loginRole)
       setSuccess(true)
     } catch (err) {
       if (err instanceof ApiError) {
@@ -227,6 +228,39 @@ export default function ResetPasswordPage() {
         {/* Step 1: 이메일 입력 */}
         {step === "email" && (
           <div className="space-y-5">
+            {/* 역할 선택 탭 */}
+            <div className="relative flex rounded-xl border border-border bg-muted/50 p-1">
+              <div
+                className="absolute top-1 bottom-1 rounded-lg bg-background shadow-sm transition-all duration-300 ease-in-out"
+                style={{
+                  width: "calc(50% - 4px)",
+                  left: loginRole === "user" ? "4px" : "calc(50% + 0px)",
+                }}
+              />
+              <button
+                type="button"
+                onClick={() => { setLoginRole("user"); setError(""); }}
+                className={`relative z-10 flex-1 rounded-lg py-2 text-sm font-medium cursor-pointer transition-colors duration-200 ${
+                  loginRole === "user"
+                    ? "text-foreground"
+                    : "text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                일반
+              </button>
+              <button
+                type="button"
+                onClick={() => { setLoginRole("project_owner"); setError(""); }}
+                className={`relative z-10 flex-1 rounded-lg py-2 text-sm font-medium cursor-pointer transition-colors duration-200 ${
+                  loginRole === "project_owner"
+                    ? "text-foreground"
+                    : "text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                프로젝트 오너
+              </button>
+            </div>
+
             <form onSubmit={handleRequestReset} className="space-y-5">
               <div className="space-y-2">
                 <label htmlFor="email" className="text-sm font-medium text-foreground">

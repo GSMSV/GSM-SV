@@ -15,6 +15,7 @@ def _validate_pw(v: str) -> str:
 
 class UserCreate(BaseModel):
     """회원가입 요청 모델 (1단계: 이메일 인증 코드 발송)"""
+
     email: EmailStr
     password: str
 
@@ -26,11 +27,13 @@ class UserCreate(BaseModel):
 
 class ProjectCheckRequest(BaseModel):
     """프로젝트 오너 가입 1단계: 이메일로 참여 프로젝트 조회"""
+
     email: EmailStr
 
 
 class ProjectSignupRequest(BaseModel):
     """프로젝트 오너 가입 2단계: 프로젝트 선택 + 비밀번호 + 신청사유"""
+
     email: EmailStr
     password: str
     project_name: str
@@ -44,17 +47,20 @@ class ProjectSignupRequest(BaseModel):
 
 class VerifyCodeRequest(BaseModel):
     """이메일 인증 코드 확인 요청 모델 (2단계: 코드 검증 → 계정 생성)"""
+
     email: EmailStr
     code: str
 
 
 class ResendCodeRequest(BaseModel):
     """인증 코드 재발송 요청 모델"""
+
     email: EmailStr
 
 
 class Token(BaseModel):
     """JWT 토큰 응답 모델 (Access + Refresh)"""
+
     access_token: str
     refresh_token: str
     token_type: str = "bearer"
@@ -62,21 +68,43 @@ class Token(BaseModel):
 
 class RefreshRequest(BaseModel):
     """Refresh Token 요청 모델 (쿠키 우선, body는 선택)"""
+
     refresh_token: str = ""
+
+
+_RESET_ROLES = {"user", "project_owner"}
 
 
 class PasswordResetRequest(BaseModel):
     """비밀번호 재설정 요청 (이메일로 인증 코드 발송)"""
+
     email: EmailStr
+    login_role: str = "user"
+
+    @field_validator("login_role")
+    @classmethod
+    def validate_role(cls, v):
+        if v not in _RESET_ROLES:
+            raise ValueError("login_role은 user 또는 project_owner여야 합니다.")
+        return v
 
 
 class PasswordResetConfirm(BaseModel):
     """비밀번호 재설정 확인 (코드 + 새 비밀번호)"""
+
     email: EmailStr
     code: str
     new_password: str
+    login_role: str = "user"
 
     @field_validator("new_password")
     @classmethod
     def validate_password(cls, v):
         return _validate_pw(v)
+
+    @field_validator("login_role")
+    @classmethod
+    def validate_role(cls, v):
+        if v not in _RESET_ROLES:
+            raise ValueError("login_role은 user 또는 project_owner여야 합니다.")
+        return v

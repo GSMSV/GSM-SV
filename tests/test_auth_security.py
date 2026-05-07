@@ -3,6 +3,7 @@ Domain 2: 인증 및 권한 테스트 (AUTH-TC-01 ~ AUTH-TC-08)
 
 비밀번호 재설정 시도 제한, 코드 재발송, JWT 타임존, VM 소유권 필터 검증.
 """
+
 import pytest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
@@ -46,9 +47,15 @@ def db():
 
 # ── 공용 Fixture ──────────────────────────────────────────────
 
+
 @pytest.fixture
 def user_a(db):
-    u = User(email="usera@gsm.hs.kr", hashed_password="hashed", role=UserRole.USER, is_active=True)
+    u = User(
+        email="usera@gsm.hs.kr",
+        hashed_password="hashed",
+        role=UserRole.USER,
+        is_active=True,
+    )
     db.add(u)
     db.commit()
     db.refresh(u)
@@ -57,7 +64,12 @@ def user_a(db):
 
 @pytest.fixture
 def user_b(db):
-    u = User(email="userb@gsm.hs.kr", hashed_password="hashed", role=UserRole.USER, is_active=True)
+    u = User(
+        email="userb@gsm.hs.kr",
+        hashed_password="hashed",
+        role=UserRole.USER,
+        is_active=True,
+    )
     db.add(u)
     db.commit()
     db.refresh(u)
@@ -66,7 +78,12 @@ def user_b(db):
 
 @pytest.fixture
 def admin(db):
-    u = User(email="admin@gsm.hs.kr", hashed_password="hashed", role=UserRole.ADMIN, is_active=True)
+    u = User(
+        email="admin@gsm.hs.kr",
+        hashed_password="hashed",
+        role=UserRole.ADMIN,
+        is_active=True,
+    )
     db.add(u)
     db.commit()
     db.refresh(u)
@@ -76,9 +93,14 @@ def admin(db):
 @pytest.fixture
 def server(db):
     s = Server(
-        name="node-1", ip_address="192.168.1.10", port=8006,
-        api_user="root@pam", api_password="pw",
-        is_active=True, base_port=21000, last_free_ram_mb=8000,
+        name="node-1",
+        ip_address="192.168.1.10",
+        port=8006,
+        api_user="root@pam",
+        api_password="pw",
+        is_active=True,
+        base_port=21000,
+        last_free_ram_mb=8000,
     )
     db.add(s)
     db.commit()
@@ -93,7 +115,7 @@ def password_reset_record(db):
         email="usera@gsm.hs.kr",
         hashed_password="",
         code="123456",
-        signup_role="password_reset",
+        signup_role="password_reset:user",
         expires_at=now_kst() + timedelta(minutes=10),
         verified=False,
         attempts=0,
@@ -105,6 +127,7 @@ def password_reset_record(db):
 
 
 # ── AUTH-TC-01: 비밀번호 재설정 시도 횟수 제한 ─────────────────
+
 
 class TestPasswordResetAttemptLimit:
     """AUTH-TC-01: 5회 오입력 후 정확한 코드도 거부"""
@@ -133,6 +156,7 @@ class TestPasswordResetAttemptLimit:
 
 # ── AUTH-TC-02: 코드 재발송 시 attempts 리셋 ──────────────────
 
+
 class TestResendCodeResetsAttempts:
     """AUTH-TC-02: 재발송 시 attempts=0으로 리셋"""
 
@@ -155,6 +179,7 @@ class TestResendCodeResetsAttempts:
 
 # ── AUTH-TC-04: JWT exp 필드 타임존 확인 ──────────────────────
 
+
 class TestJWTTimezone:
     """AUTH-TC-04: JWT가 UTC 기반 exp 사용"""
 
@@ -164,7 +189,9 @@ class TestJWTTimezone:
         from core.config import settings
 
         token = create_access_token(subject="1")
-        payload = jose_jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+        payload = jose_jwt.decode(
+            token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM]
+        )
         exp = payload["exp"]
         # exp는 UTC 타임스탬프여야 함
         now_utc = datetime.now(timezone.utc).timestamp()
@@ -180,13 +207,16 @@ class TestJWTTimezone:
         from core.config import settings
 
         token = create_refresh_token(subject="1")
-        payload = jose_jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+        payload = jose_jwt.decode(
+            token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM]
+        )
         exp = payload["exp"]
         now_utc = datetime.now(timezone.utc).timestamp()
         assert exp > now_utc
 
 
 # ── AUTH-TC-05: User A가 User B의 VM에 node 파라미터로 접근 ──
+
 
 class TestVMOwnerIsolation:
     """AUTH-TC-05/06: VM 소유권 필터링"""
@@ -219,7 +249,9 @@ class TestVMOwnerIsolation:
         db.add(vm)
         db.commit()
 
-        result = get_vm_with_owner_check(db, vmid=200, current_user=admin, node="node-1")
+        result = get_vm_with_owner_check(
+            db, vmid=200, current_user=admin, node="node-1"
+        )
         assert result.id == vm.id
 
     def test_user_can_access_own_vm_with_node(self, db, user_a, server):
@@ -234,10 +266,14 @@ class TestVMOwnerIsolation:
         db.add(vm)
         db.commit()
 
-        result = get_vm_with_owner_check(db, vmid=200, current_user=user_a, node="node-1")
+        result = get_vm_with_owner_check(
+            db, vmid=200, current_user=user_a, node="node-1"
+        )
         assert result.id == vm.id
 
-    def test_user_cannot_access_others_vm_without_node(self, db, user_a, user_b, server):
+    def test_user_cannot_access_others_vm_without_node(
+        self, db, user_a, user_b, server
+    ):
         """node 없이도 다른 유저의 VM 접근 불가"""
         vm = Vm(
             hypervisor_vmid=200,
@@ -259,14 +295,24 @@ class TestVMOwnerIsolation:
         User A는 node-1의 VM만, User B는 node-2의 VM만 조회 가능해야 함.
         """
         server1 = Server(
-            name="node-1", ip_address="192.168.1.10", port=8006,
-            api_user="root@pam", api_password="pw",
-            is_active=True, base_port=21000, last_free_ram_mb=8000,
+            name="node-1",
+            ip_address="192.168.1.10",
+            port=8006,
+            api_user="root@pam",
+            api_password="pw",
+            is_active=True,
+            base_port=21000,
+            last_free_ram_mb=8000,
         )
         server2 = Server(
-            name="node-2", ip_address="192.168.1.11", port=8006,
-            api_user="root@pam", api_password="pw",
-            is_active=True, base_port=22000, last_free_ram_mb=8000,
+            name="node-2",
+            ip_address="192.168.1.11",
+            port=8006,
+            api_user="root@pam",
+            api_password="pw",
+            is_active=True,
+            base_port=22000,
+            last_free_ram_mb=8000,
         )
         db.add_all([server1, server2])
         db.commit()
@@ -275,20 +321,26 @@ class TestVMOwnerIsolation:
 
         # 같은 vmid 300이 두 노드에 존재
         vm_a = Vm(
-            hypervisor_vmid=300, name="a-vm",
-            server_id=server1.id, owner_id=user_a.id,
+            hypervisor_vmid=300,
+            name="a-vm",
+            server_id=server1.id,
+            owner_id=user_a.id,
             internal_ip="10.0.0.10",
         )
         vm_b = Vm(
-            hypervisor_vmid=300, name="b-vm",
-            server_id=server2.id, owner_id=user_b.id,
+            hypervisor_vmid=300,
+            name="b-vm",
+            server_id=server2.id,
+            owner_id=user_b.id,
             internal_ip="10.0.1.10",
         )
         db.add_all([vm_a, vm_b])
         db.commit()
 
         # User A가 node-1 지정 → 자기 VM 반환
-        result = get_vm_with_owner_check(db, vmid=300, current_user=user_a, node="node-1")
+        result = get_vm_with_owner_check(
+            db, vmid=300, current_user=user_a, node="node-1"
+        )
         assert result.id == vm_a.id
         assert result.owner_id == user_a.id
 
@@ -298,21 +350,35 @@ class TestVMOwnerIsolation:
         assert exc_info.value.status_code == 404
 
         # User B가 node-2 지정 → 자기 VM 반환
-        result_b = get_vm_with_owner_check(db, vmid=300, current_user=user_b, node="node-2")
+        result_b = get_vm_with_owner_check(
+            db, vmid=300, current_user=user_b, node="node-2"
+        )
         assert result_b.id == vm_b.id
         assert result_b.owner_id == user_b.id
 
-    def test_admin_with_node_selects_correct_vm_across_nodes(self, db, admin, user_a, user_b):
+    def test_admin_with_node_selects_correct_vm_across_nodes(
+        self, db, admin, user_a, user_b
+    ):
         """Admin도 node 파라미터로 특정 노드의 VM만 조회 — 교차 오염 방지"""
         server1 = Server(
-            name="node-1", ip_address="192.168.1.10", port=8006,
-            api_user="root@pam", api_password="pw",
-            is_active=True, base_port=21000, last_free_ram_mb=8000,
+            name="node-1",
+            ip_address="192.168.1.10",
+            port=8006,
+            api_user="root@pam",
+            api_password="pw",
+            is_active=True,
+            base_port=21000,
+            last_free_ram_mb=8000,
         )
         server2 = Server(
-            name="node-2", ip_address="192.168.1.11", port=8006,
-            api_user="root@pam", api_password="pw",
-            is_active=True, base_port=22000, last_free_ram_mb=8000,
+            name="node-2",
+            ip_address="192.168.1.11",
+            port=8006,
+            api_user="root@pam",
+            api_password="pw",
+            is_active=True,
+            base_port=22000,
+            last_free_ram_mb=8000,
         )
         db.add_all([server1, server2])
         db.commit()
@@ -320,25 +386,34 @@ class TestVMOwnerIsolation:
         db.refresh(server2)
 
         vm_a = Vm(
-            hypervisor_vmid=400, name="a-vm",
-            server_id=server1.id, owner_id=user_a.id,
+            hypervisor_vmid=400,
+            name="a-vm",
+            server_id=server1.id,
+            owner_id=user_a.id,
             internal_ip="10.0.0.10",
         )
         vm_b = Vm(
-            hypervisor_vmid=400, name="b-vm",
-            server_id=server2.id, owner_id=user_b.id,
+            hypervisor_vmid=400,
+            name="b-vm",
+            server_id=server2.id,
+            owner_id=user_b.id,
             internal_ip="10.0.1.10",
         )
         db.add_all([vm_a, vm_b])
         db.commit()
 
-        result1 = get_vm_with_owner_check(db, vmid=400, current_user=admin, node="node-1")
+        result1 = get_vm_with_owner_check(
+            db, vmid=400, current_user=admin, node="node-1"
+        )
         assert result1.id == vm_a.id
-        result2 = get_vm_with_owner_check(db, vmid=400, current_user=admin, node="node-2")
+        result2 = get_vm_with_owner_check(
+            db, vmid=400, current_user=admin, node="node-2"
+        )
         assert result2.id == vm_b.id
 
 
 # ── AUTH-TC-08: 만료된 인증 코드 ──────────────────────────────
+
 
 class TestExpiredResetCode:
     """AUTH-TC-08: 만료된 코드로 비밀번호 재설정 시도"""
@@ -365,12 +440,14 @@ class TestExpiredResetCode:
 
 # ── 포트 범위 검증 (calculate_ports) 추가 확인 ────────────────
 
+
 class TestPortRangeValidation:
     """포트 계산 시 범위 초과 검증"""
 
     def test_svc2_overflow(self):
         """svc2 포트(base+2000+vmid)가 65535 초과 시 ValueError"""
         from services.network_service import calculate_ports
+
         with pytest.raises(ValueError):
             calculate_ports(63000, 1000)  # svc2 = 63000+2000+1000 = 66000 > 65535
 
@@ -378,12 +455,14 @@ class TestPortRangeValidation:
 # ── AUTH-TC-01/02 HTTP 통합 테스트 ────────────────────────────
 # SQLite는 timezone-aware datetime 미지원 → now_kst를 naive로 패치
 
+
 def _naive_now():
     return datetime.utcnow()
 
 
 def _get_auth_app():
     from api.routes import auth as auth_module
+
     _app = FastAPI()
     _app.include_router(auth_module.router, prefix="/api/v1/auth")
 
@@ -401,17 +480,21 @@ def _get_auth_app():
 def _insert_reset_record(email: str, code: str, attempts: int = 0) -> None:
     db = TestSession()
     try:
-        db.query(EmailVerification).filter_by(email=email, signup_role="password_reset").delete()
+        db.query(EmailVerification).filter_by(
+            email=email, signup_role="password_reset:user"
+        ).delete()
         db.commit()
-        db.add(EmailVerification(
-            email=email,
-            hashed_password="",
-            code=code,
-            signup_role="password_reset",
-            expires_at=datetime.utcnow() + timedelta(minutes=10),
-            verified=False,
-            attempts=attempts,
-        ))
+        db.add(
+            EmailVerification(
+                email=email,
+                hashed_password="",
+                code=code,
+                signup_role="password_reset:user",
+                expires_at=datetime.utcnow() + timedelta(minutes=10),
+                verified=False,
+                attempts=attempts,
+            )
+        )
         db.commit()
     finally:
         db.close()
@@ -422,12 +505,14 @@ def _insert_reset_user(email: str) -> None:
     try:
         db.query(User).filter_by(email=email).delete()
         db.commit()
-        db.add(User(
-            email=email,
-            hashed_password="$2b$12$fakehashfortest000000000000000000000000000000000000000",
-            role=UserRole.USER,
-            is_active=True,
-        ))
+        db.add(
+            User(
+                email=email,
+                hashed_password="$2b$12$fakehashfortest000000000000000000000000000000000000000",
+                role=UserRole.USER,
+                is_active=True,
+            )
+        )
         db.commit()
     finally:
         db.close()
@@ -437,7 +522,12 @@ def _confirm(client, email: str, code: str):
     """confirm_password_reset 헬퍼 — rate limit은 http_client fixture에서 limiter.storage.reset()으로 격리"""
     return client.post(
         "/api/v1/auth/password-reset/confirm",
-        json={"email": email, "code": code, "new_password": "Testpass1!"},
+        json={
+            "email": email,
+            "code": code,
+            "new_password": "Testpass1!",
+            "login_role": "user",
+        },
     )
 
 
@@ -451,6 +541,7 @@ class TestConfirmPasswordResetHTTP:
     @pytest.fixture
     def http_client(self, setup_db):
         from api.routes.auth import limiter
+
         limiter._limiter.storage.reset()
         with TestClient(_get_auth_app(), raise_server_exceptions=False) as c:
             yield c
@@ -474,9 +565,11 @@ class TestConfirmPasswordResetHTTP:
 
         db = TestSession()
         try:
-            record = db.query(EmailVerification).filter_by(
-                email="reset2@gsm.hs.kr", signup_role="password_reset"
-            ).first()
+            record = (
+                db.query(EmailVerification)
+                .filter_by(email="reset2@gsm.hs.kr", signup_role="password_reset:user")
+                .first()
+            )
             assert record.attempts == 1
         finally:
             db.close()

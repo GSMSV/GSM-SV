@@ -145,11 +145,8 @@ class TestChangePassword:
         assert res.status_code == 400
         assert "72바이트" in res.json()["detail"]
 
-    def test_dual_role_account_login_after_change(self, client, db):
-        """같은 이메일에 USER와 PROJECT_OWNER 계정이 모두 있는 경우 — 모두 갱신되어야 한다.
-
-        password-reset/confirm과 동일한 정책: 같은 이메일의 모든 활성 row 일괄 갱신.
-        """
+    def test_dual_role_account_isolated_on_change(self, client, db):
+        """USER+PROJECT_OWNER 듀얼 계정은 별개로 취급 — PO에서 변경해도 USER는 그대로."""
         _make_user(db, email="dup@gsm.hs.kr", password="OldPass1!")
         po_row = User(
             email="dup@gsm.hs.kr",
@@ -168,29 +165,26 @@ class TestChangePassword:
         )
         assert change.status_code == 200
 
-        # 양쪽 role 모두 새 비밀번호로 로그인 가능해야 함
-        login_user = client.post(
-            "/api/v1/auth/login",
-            data={"username": "dup@gsm.hs.kr", "password": "NewPass2@"},
-        )
+        # PO 탭은 새 비밀번호로 성공
         login_po = client.post(
             "/api/v1/auth/login?login_role=project_owner",
             data={"username": "dup@gsm.hs.kr", "password": "NewPass2@"},
         )
-        assert login_user.status_code == 200, login_user.text
-        assert login_po.status_code == 200, login_po.text
+        assert login_po.status_code == 200
 
-        # 옛 비밀번호로는 양쪽 모두 실패
-        old_user = client.post(
+        # USER 탭은 옛 비밀번호 그대로
+        login_user_old = client.post(
             "/api/v1/auth/login",
             data={"username": "dup@gsm.hs.kr", "password": "OldPass1!"},
         )
-        old_po = client.post(
-            "/api/v1/auth/login?login_role=project_owner",
-            data={"username": "dup@gsm.hs.kr", "password": "OldPass1!"},
+        assert login_user_old.status_code == 200
+
+        # USER 탭에서 PO의 새 비밀번호는 실패해야 함
+        login_user_new = client.post(
+            "/api/v1/auth/login",
+            data={"username": "dup@gsm.hs.kr", "password": "NewPass2@"},
         )
-        assert old_user.status_code == 401
-        assert old_po.status_code == 401
+        assert login_user_new.status_code == 401
 
     def test_db_direct_plaintext_password_login(self, client, db):
         """hashed_password 컬럼에 비-bcrypt 형식이 들어 있어도 500이 아닌 401."""
@@ -234,8 +228,8 @@ class TestChangePassword:
         )
         assert new_login.status_code == 200, new_login.text
 
-    def test_change_password_updates_all_role_rows_at_db_level(self, client, db):
-        """DB 레벨에서 같은 이메일의 모든 활성 row가 새 해시로 갱신되는지 직접 확인."""
+    def test_change_password_does_not_touch_other_role_row(self, client, db):
+        """DB 레벨에서 PO row 변경 시 USER row의 해시는 그대로인지 확인."""
         old_hash = get_password_hash("OldPass1!")
         u_user = User(
             email="multi@gsm.hs.kr",
@@ -265,9 +259,80 @@ class TestChangePassword:
         u_user_reloaded = db.query(User).filter_by(id=u_user.id).first()
         u_po_reloaded = db.query(User).filter_by(id=u_po.id).first()
         assert verify_password("NewPass2@", u_po_reloaded.hashed_password)
-        assert verify_password("NewPass2@", u_user_reloaded.hashed_password), (
-            "USER row도 함께 갱신되어야 함 (재설정과 동일한 정책)"
+        assert verify_password("OldPass1!", u_user_reloaded.hashed_password), (
+            "USER row는 PO 변경의 영향을 받지 않아야 함 (별개 계정 정책)"
         )
+
+    def test_password_reset_request_creates_role_specific_record(self, client, db):
+        """비밀번호 재설정 요청은 login_role에 따라 분리된 EmailVerification을 만든다."""
+        from models.email_verification import EmailVerification
+
+        u_user = User(
+            email="reset@gsm.hs.kr",
+            hashed_password=get_password_hash("OldPass1!"),
+            role=UserRole.USER,
+            is_active=True,
+        )
+        u_po = User(
+            email="reset@gsm.hs.kr",
+            hashed_password=get_password_hash("OldPass1!"),
+            role=UserRole.PROJECT_OWNER,
+            is_active=True,
+        )
+        db.add_all([u_user, u_po])
+        db.commit()
+
+        # SMTP 호출은 모킹 — 단위 환경에선 실제 발송 안 됨
+        from unittest.mock import patch
+
+        with patch("api.routes.auth.send_verification_email", return_value=True):
+            res_user = client.post(
+                "/api/v1/auth/password-reset/request",
+                json={"email": "reset@gsm.hs.kr", "login_role": "user"},
+            )
+            res_po = client.post(
+                "/api/v1/auth/password-reset/request",
+                json={
+                    "email": "reset@gsm.hs.kr",
+                    "login_role": "project_owner",
+                },
+            )
+        assert res_user.status_code == 200, res_user.text
+        assert res_po.status_code == 200, res_po.text
+
+        db.expire_all()
+        records = (
+            db.query(EmailVerification)
+            .filter(EmailVerification.email == "reset@gsm.hs.kr")
+            .all()
+        )
+        roles = {r.signup_role for r in records}
+        assert "password_reset:user" in roles
+        assert "password_reset:project_owner" in roles
+
+    def test_password_reset_request_role_mismatch_silently_succeeds(self, client, db):
+        """존재하지 않는 role 조합 요청도 보안상 같은 메시지 — 레코드는 생성 안 됨."""
+        from models.email_verification import EmailVerification
+        from unittest.mock import patch
+
+        # USER만 존재
+        _make_user(db, email="onlyuser@gsm.hs.kr")
+
+        with patch("api.routes.auth.send_verification_email", return_value=True):
+            res = client.post(
+                "/api/v1/auth/password-reset/request",
+                json={
+                    "email": "onlyuser@gsm.hs.kr",
+                    "login_role": "project_owner",
+                },
+            )
+        assert res.status_code == 200
+        recs = (
+            db.query(EmailVerification)
+            .filter(EmailVerification.email == "onlyuser@gsm.hs.kr")
+            .all()
+        )
+        assert len(recs) == 0, "PO 계정이 없으므로 레코드도 생성되지 않아야 함"
 
     def test_login_with_new_password_after_change(self, client, db):
         """변경 → 새 비밀번호 로그인 성공, 옛 비밀번호 로그인 실패."""

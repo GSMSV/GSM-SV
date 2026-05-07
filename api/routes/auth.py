@@ -689,15 +689,30 @@ async def read_users_me(current_user: User = Depends(get_current_user)):
 # ── 비밀번호 재설정 ──────────────────────────────────────────
 
 
+_RESET_ROLE_MAP = {"user": UserRole.USER, "project_owner": UserRole.PROJECT_OWNER}
+
+
+def _reset_signup_role(login_role: str) -> str:
+    """role별로 인증 레코드를 분리하기 위한 signup_role 인코딩."""
+    return f"password_reset:{login_role}"
+
+
 @router.post("/password-reset/request")
 @limiter.limit("3/minute")
 async def request_password_reset(
     request: Request, body: PasswordResetRequest, db: Session = Depends(get_db)
 ):
-    """비밀번호 재설정 1단계: 이메일로 인증 코드를 발송합니다."""
-    # 해당 이메일의 활성 계정이 있는지 확인 (역할 무관)
+    """비밀번호 재설정 1단계: 이메일+role로 인증 코드를 발송합니다."""
+    target_role = _RESET_ROLE_MAP[body.login_role]
+    # 해당 이메일+role의 활성 계정이 있는지 확인
     user = (
-        db.query(User).filter(User.email == body.email, User.is_active == True).first()
+        db.query(User)
+        .filter(
+            User.email == body.email,
+            User.role == target_role,
+            User.is_active == True,
+        )
+        .first()
     )
     if not user:
         # 보안상 존재하지 않는 이메일이어도 같은 메시지 반환
@@ -706,10 +721,11 @@ async def request_password_reset(
             "email": body.email,
         }
 
-    # 기존 미인증 비밀번호 재설정 레코드 삭제
+    sr = _reset_signup_role(body.login_role)
+    # 기존 미인증 비밀번호 재설정 레코드 삭제 (같은 role만)
     db.query(EmailVerification).filter(
         EmailVerification.email == body.email,
-        EmailVerification.signup_role == "password_reset",
+        EmailVerification.signup_role == sr,
         EmailVerification.verified == False,
     ).delete()
     db.commit()
@@ -719,7 +735,7 @@ async def request_password_reset(
         email=body.email,
         hashed_password="",  # 재설정이므로 기존 비밀번호 불필요
         code=code,
-        signup_role="password_reset",
+        signup_role=sr,
         expires_at=now_kst()
         + timedelta(minutes=settings.VERIFICATION_CODE_EXPIRE_MINUTES),
     )
@@ -741,12 +757,14 @@ async def request_password_reset(
 async def confirm_password_reset(
     request: Request, body: PasswordResetConfirm, db: Session = Depends(get_db)
 ):
-    """비밀번호 재설정 2단계: 인증 코드 확인 + 새 비밀번호 설정."""
+    """비밀번호 재설정 2단계: 인증 코드 확인 + 해당 role 계정의 비밀번호만 변경."""
+    target_role = _RESET_ROLE_MAP[body.login_role]
+    sr = _reset_signup_role(body.login_role)
     record = (
         db.query(EmailVerification)
         .filter(
             EmailVerification.email == body.email,
-            EmailVerification.signup_role == "password_reset",
+            EmailVerification.signup_role == sr,
             EmailVerification.verified == False,
         )
         .order_by(EmailVerification.created_at.desc())
@@ -782,17 +800,20 @@ async def confirm_password_reset(
             detail="비밀번호가 너무 깁니다. UTF-8 기준 72바이트 이하여야 합니다.",
         )
 
-    # 해당 이메일의 모든 활성 계정 비밀번호 변경
-    users = (
-        db.query(User).filter(User.email == body.email, User.is_active == True).all()
+    # 해당 이메일+role의 활성 계정만 비밀번호 변경
+    user = (
+        db.query(User)
+        .filter(
+            User.email == body.email,
+            User.role == target_role,
+            User.is_active == True,
+        )
+        .first()
     )
-    if not users:
+    if not user:
         raise HTTPException(status_code=404, detail="계정을 찾을 수 없습니다.")
 
-    new_hash = get_password_hash(body.new_password)
-    for user in users:
-        user.hashed_password = new_hash
-
+    user.hashed_password = get_password_hash(body.new_password)
     db.delete(record)
     db.commit()
 
@@ -815,8 +836,8 @@ async def change_password(
 ):
     """로그인한 사용자의 비밀번호를 변경합니다.
 
-    같은 이메일로 여러 role 계정이 있는 경우 모든 활성 row를 함께 갱신합니다.
-    (password-reset/confirm과 동일한 정책)
+    같은 이메일로 여러 role 계정이 있어도 현재 로그인된 row 1건만 갱신합니다.
+    (USER와 PROJECT_OWNER는 별개 계정으로 취급)
     """
     if not current_user.hashed_password:
         raise HTTPException(
@@ -843,15 +864,7 @@ async def change_password(
             detail="비밀번호가 너무 깁니다. UTF-8 기준 72바이트 이하여야 합니다.",
         )
 
-    new_hash = get_password_hash(body.new_password)
-    users = (
-        db.query(User)
-        .filter(User.email == current_user.email, User.is_active == True)
-        .all()
-    )
-    for user in users:
-        if user.hashed_password:  # OAuth 전용 row는 건드리지 않음
-            user.hashed_password = new_hash
+    current_user.hashed_password = get_password_hash(body.new_password)
     db.commit()
     return {"message": "비밀번호가 변경되었습니다."}
 
