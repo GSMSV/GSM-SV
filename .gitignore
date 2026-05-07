@@ -45,4 +45,7 @@ nginx/
 .claude/worktrees/
 .claude/launch.json
 
+# Codex generated reports
+.codex/migrate-to-codex-report.txt
+
 /docs/
