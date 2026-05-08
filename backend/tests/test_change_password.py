@@ -50,6 +50,9 @@ def app(db):
 
 @pytest.fixture
 def client(app):
+    from api.routes.auth import limiter
+
+    limiter._limiter.storage.reset()
     with TestClient(app, raise_server_exceptions=False) as c:
         yield c
 
@@ -409,3 +412,74 @@ class TestChangePassword:
             data={"username": "login@gsm.hs.kr", "password": "OldPass1!"},
         )
         assert old_login.status_code == 401
+
+    def test_admin_password_reset_request_creates_record(self, client, db):
+        """ADMIN 계정은 user 탭(login_role=user)으로 재설정 요청 시 레코드가 생성된다."""
+        from models.email_verification import EmailVerification
+        from unittest.mock import patch
+
+        admin = User(
+            email="admin@gsm.hs.kr",
+            hashed_password=get_password_hash("OldPass1!"),
+            role=UserRole.ADMIN,
+            is_active=True,
+        )
+        db.add(admin)
+        db.commit()
+
+        with patch("api.routes.auth.send_verification_email", return_value=True):
+            req = client.post(
+                "/api/v1/auth/password-reset/request",
+                json={"email": "admin@gsm.hs.kr", "login_role": "user"},
+            )
+        assert req.status_code == 200, req.text
+
+        db.expire_all()
+        record = (
+            db.query(EmailVerification)
+            .filter_by(email="admin@gsm.hs.kr", signup_role="password_reset:user")
+            .first()
+        )
+        assert record is not None, "ADMIN 계정의 재설정 레코드가 생성되어야 함"
+
+    def test_admin_password_reset_confirm_changes_password(self, client, db):
+        """ADMIN 계정은 user 탭 코드로 confirm 시 비밀번호가 변경된다."""
+        from datetime import datetime, timedelta
+        from unittest.mock import patch
+        from models.email_verification import EmailVerification
+
+        admin = User(
+            email="admin2@gsm.hs.kr",
+            hashed_password=get_password_hash("OldPass1!"),
+            role=UserRole.ADMIN,
+            is_active=True,
+        )
+        reset_record = EmailVerification(
+            email="admin2@gsm.hs.kr",
+            hashed_password="",
+            code="123456",
+            signup_role="password_reset:user",
+            expires_at=datetime.utcnow() + timedelta(minutes=10),
+            verified=False,
+            attempts=0,
+        )
+        db.add_all([admin, reset_record])
+        db.commit()
+        db.refresh(admin)
+
+        # SQLite는 timezone-naive datetime을 저장하므로 now_kst()도 naive로 패치
+        with patch("api.routes.auth.now_kst", lambda: datetime.utcnow()):
+            confirm = client.post(
+                "/api/v1/auth/password-reset/confirm",
+                json={
+                    "email": "admin2@gsm.hs.kr",
+                    "code": "123456",
+                    "new_password": "NewPass2@",
+                    "login_role": "user",
+                },
+            )
+        assert confirm.status_code == 200, confirm.text
+
+        db.expire_all()
+        admin_reloaded = db.query(User).filter_by(id=admin.id).first()
+        assert verify_password("NewPass2@", admin_reloaded.hashed_password)

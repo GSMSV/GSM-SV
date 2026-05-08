@@ -713,6 +713,17 @@ async def request_password_reset(
         )
         .first()
     )
+    # ADMIN은 user 탭으로 재설정 가능 (로그인과 동일 정책)
+    if not user and body.login_role == "user":
+        user = (
+            db.query(User)
+            .filter(
+                User.email == body.email,
+                User.role == UserRole.ADMIN,
+                User.is_active == True,
+            )
+            .first()
+        )
     if not user:
         # 보안상 존재하지 않는 이메일이어도 같은 메시지 반환
         return {
@@ -803,6 +814,17 @@ async def confirm_password_reset(
         )
         .first()
     )
+    # ADMIN은 user 탭으로 재설정 가능 (로그인과 동일 정책)
+    if not user and body.login_role == "user":
+        user = (
+            db.query(User)
+            .filter(
+                User.email == body.email,
+                User.role == UserRole.ADMIN,
+                User.is_active == True,
+            )
+            .first()
+        )
     if not user:
         raise HTTPException(status_code=404, detail="계정을 찾을 수 없습니다.")
 
