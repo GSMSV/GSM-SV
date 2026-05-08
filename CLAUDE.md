@@ -6,7 +6,7 @@ Proxmox VE 기반 VM 신청·관리 플랫폼. Backend: FastAPI/SQLAlchemy/Postg
 
 ## 📁 디렉터리 구조
 
-`api/routes/` 라우터, `services/` 비즈니스 로직, `models/` SQLAlchemy 모델, `schemas/` Pydantic 스키마, `core/` 설정·DB·보안, `main.py` 앱 진입점·백그라운드 태스크  
+`backend/api/routes/` 라우터, `backend/services/` 비즈니스 로직, `backend/models/` SQLAlchemy 모델, `backend/schemas/` Pydantic 스키마, `backend/core/` 설정·DB·보안, `backend/main.py` 앱 진입점·백그라운드 태스크  
 `frontend/app/` Next.js 페이지, `frontend/components/` React 컴포넌트, `frontend/lib/` api.ts·types.ts·유틸
 
 ---
@@ -14,51 +14,51 @@ Proxmox VE 기반 VM 신청·관리 플랫폼. Backend: FastAPI/SQLAlchemy/Postg
 ## 🗂 기능 도메인별 주요 파일
 
 **인증 (Auth)**
-- `api/routes/auth.py` — 회원가입·이메일 인증·로그인·토큰 갱신·비밀번호 재설정
-- `api/routes/oauth.py` — Google OAuth
-- `models/user.py`, `models/email_verification.py`, `schemas/user_schema.py`
-- `core/security.py` (JWT), `services/email_service.py`
-- FE: `app/login/`, `app/signup/`, `app/verify/`, `app/reset-password/`, `lib/auth-context.tsx`
+- `backend/api/routes/auth.py` — 회원가입·이메일 인증·로그인·토큰 갱신·비밀번호 재설정
+- `backend/api/routes/oauth.py` — Google OAuth
+- `backend/models/user.py`, `backend/models/email_verification.py`, `backend/schemas/user_schema.py`
+- `backend/core/security.py` (JWT), `backend/services/email_service.py`
+- FE: `frontend/app/login/`, `frontend/app/signup/`, `frontend/app/verify/`, `frontend/app/reset-password/`, `frontend/lib/auth-context.tsx`
 
 **VM 관리 (VM Control)**
-- `api/routes/vmcontrol.py` — VM 목록·상태·생성·액션·리사이즈·스냅샷
-- `services/vm_service.py` (비즈니스 로직), `services/proxmox_client.py` (Proxmox API 래퍼)
-- `models/vm.py`, `models/server.py`, `schemas/vm_schema.py`
-- `main.py` — `_expire_vms_loop`, `_daily_snapshot_loop`
-- FE: `app/(dashboard)/instances/`, `components/instances/` (테이블·overview·metrics·backups·settings 탭)
+- `backend/api/routes/vmcontrol.py` — VM 목록·상태·생성·액션·리사이즈·스냅샷
+- `backend/services/vm_service.py` (비즈니스 로직), `backend/services/proxmox_client.py` (Proxmox API 래퍼)
+- `backend/models/vm.py`, `backend/models/server.py`, `backend/schemas/vm_schema.py`
+- `backend/main.py` — `_expire_vms_loop`, `_daily_snapshot_loop`
+- FE: `frontend/app/(dashboard)/instances/`, `frontend/components/instances/` (테이블·overview·metrics·backups·settings 탭)
 
 **VM 신청 (Deploy)**
-- `api/routes/vmcontrol.py` — `POST /create`, `services/vm_service.py` — `create_vm()`
-- `services/network_service.py` — IP 할당·포트 계산
-- FE: `app/(dashboard)/deploy/`, `components/deploy/deploy-wizard.tsx`
+- `backend/api/routes/vmcontrol.py` — `POST /create`, `backend/services/vm_service.py` — `create_vm()`
+- `backend/services/network_service.py` — IP 할당·포트 계산
+- FE: `frontend/app/(dashboard)/deploy/`, `frontend/components/deploy/deploy-wizard.tsx`
 
 **방화벽 & 포트포워딩**
-- `api/routes/firewall.py` — Proxmox 방화벽 룰·커스텀 포트 CRUD
-- `api/routes/network.py` — 포워딩 포트 조회
-- `services/network_service.py` — iptables 관리, `models/vm_port.py`, `schemas/fw_schema.py`
-- FE: `components/instances/tabs/firewall-tab.tsx`
+- `backend/api/routes/firewall.py` — Proxmox 방화벽 룰·커스텀 포트 CRUD
+- `backend/api/routes/network.py` — 포워딩 포트 조회
+- `backend/services/network_service.py` — iptables 관리, `backend/models/vm_port.py`, `backend/schemas/fw_schema.py`
+- FE: `frontend/components/instances/tabs/firewall-tab.tsx`
 
 **모니터링**
-- `api/routes/monitoring.py` — 노드 통계, `services/mon_service.py` — Proxmox 메트릭
-- FE: `components/instances/tabs/metrics-tab.tsx`
+- `backend/api/routes/monitoring.py` — 노드 통계, `backend/services/mon_service.py` — Proxmox 메트릭
+- FE: `frontend/components/instances/tabs/metrics-tab.tsx`
 
 **알림**
-- `api/routes/notifications.py`, `models/notification.py`
-- FE: `lib/notification-context.tsx`, `components/dashboard/top-navbar.tsx`
+- `backend/api/routes/notifications.py`, `backend/models/notification.py`
+- FE: `frontend/lib/notification-context.tsx`, `frontend/components/dashboard/top-navbar.tsx`
 
 **관리자 (Admin)**
-- `api/routes/auth.py` — `/pending-approvals`, `/approve/{id}`, `/reject/{id}`
-- `api/routes/vmcontrol.py` — `/admin/all-vms`
-- FE: `app/(dashboard)/admin/approvals/`
+- `backend/api/routes/auth.py` — `/pending-approvals`, `/approve/{id}`, `/reject/{id}`
+- `backend/api/routes/vmcontrol.py` — `/admin/all-vms`
+- FE: `frontend/app/(dashboard)/admin/approvals/`
 
 **FAQ**
-- `api/routes/faq.py`, `models/faq_question.py`
-- FE: `app/(dashboard)/docs/`, `components/docs/docs-layout.tsx`
+- `backend/api/routes/faq.py`, `backend/models/faq_question.py`
+- FE: `frontend/app/(dashboard)/docs/`, `frontend/components/docs/docs-layout.tsx`
 
 **공통**
 - `frontend/lib/types.ts` — 전체 프론트 타입, `frontend/lib/api.ts` — 백엔드 호출 함수
-- `core/config.py` — Settings (.env), `core/init_servers.py` — 노드 동기화
-- `services/datagsm_service.py` — DataGSM 연동
+- `backend/core/config.py` — Settings (.env), `backend/core/init_servers.py` — 노드 동기화
+- `backend/services/datagsm_service.py` — DataGSM 연동
 
 ---
 
@@ -111,7 +111,7 @@ Proxmox VE 기반 VM 신청·관리 플랫폼. Backend: FastAPI/SQLAlchemy/Postg
 
 ## 🧪 테스트
 
-전체 테스트(`pytest tests/`) 매번 실행 금지 — 변경 파일 관련 테스트만 선별 실행. 관련 테스트 없으면 생략 가능.
+전체 테스트(`cd backend && pytest tests/`) 매번 실행 금지 — 변경 파일 관련 테스트만 선별 실행. 관련 테스트 없으면 생략 가능.
 
 ---
 
@@ -138,4 +138,4 @@ Proxmox VE 기반 VM 신청·관리 플랫폼. Backend: FastAPI/SQLAlchemy/Postg
 - 도메인: `gsmsv.site` (웹) · `ssh.gsmsv.site` (포트포워딩) · `service.gsmsv.site` (Vultr VPC)
 - Proxmox 노드: `.env`의 `NODE_1/2/3_*`, 프로젝트 오너 전용: `settings.PROJECT_NODE_NAME` (기본 `gsmgpu3`)
 - VM 티어: BASIC / STANDARD / ADVANCED / PROJECT_CUSTOM
-- 업로드: `uploads/avatars/` (Docker volume `gsmsv_uploads`)
+- 업로드: `backend/uploads/avatars/` (Docker volume `gsmsv_uploads`)
