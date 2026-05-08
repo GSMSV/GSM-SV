@@ -1,26 +1,45 @@
 import json
-import re
 import time
 from datetime import timedelta
 from pathlib import Path
 from core.timezone import now_kst
-from fastapi import APIRouter, Depends, HTTPException, status, Query, Request, UploadFile, File
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    status,
+    Query,
+    Request,
+    UploadFile,
+    File,
+)
 from sqlalchemy.exc import IntegrityError
 from fastapi.responses import JSONResponse
 from fastapi.security import OAuth2PasswordRequestForm
-from pydantic import BaseModel as _BM
 from sqlalchemy.orm import Session
 from jose import jwt, JWTError
 from core.database import get_db
 from core.config import settings
-from core.security import verify_password, create_access_token, create_refresh_token, get_password_hash
+from core.security import (
+    create_access_token,
+    create_refresh_token,
+    get_password_hash,
+    verify_password,
+)
 from models.user import User, UserRole
 from models.email_verification import EmailVerification
 from api.dependencies import get_current_user
 from schemas.user_schema import (
-    UserCreate, VerifyCodeRequest, ResendCodeRequest, Token, RefreshRequest,
-    ProjectCheckRequest, ProjectSignupRequest,
-    PasswordResetRequest, PasswordResetConfirm,
+    UserCreate,
+    VerifyCodeRequest,
+    ResendCodeRequest,
+    Token,
+    RefreshRequest,
+    ProjectCheckRequest,
+    ProjectSignupRequest,
+    PasswordResetRequest,
+    PasswordResetConfirm,
+    ChangePasswordRequest,
 )
 from services.email_service import generate_verification_code, send_verification_email
 from services.datagsm_service import lookup_student_by_email, lookup_projects_by_email
@@ -77,6 +96,7 @@ def _find_user_by_email_role(db: Session, email: str, role: UserRole):
 
 # ── 일반 학생 회원가입 ───────────────────────────────────────
 
+
 @router.post("/signup")
 @limiter.limit("5/minute")
 async def signup(request: Request, user_in: UserCreate, db: Session = Depends(get_db)):
@@ -86,7 +106,9 @@ async def signup(request: Request, user_in: UserCreate, db: Session = Depends(ge
     # 같은 이메일 + USER 역할로 이미 가입되었는지 확인
     existing = _find_user_by_email_role(db, user_in.email, UserRole.USER)
     if existing:
-        raise HTTPException(status_code=400, detail="이미 일반 계정으로 가입된 이메일입니다.")
+        raise HTTPException(
+            status_code=400, detail="이미 일반 계정으로 가입된 이메일입니다."
+        )
 
     # DataGSM API로 재학생 검증
     try:
@@ -117,14 +139,18 @@ async def signup(request: Request, user_in: UserCreate, db: Session = Depends(ge
         code=code,
         student_info=json.dumps(student_info, ensure_ascii=False),
         signup_role="user",
-        expires_at=now_kst() + timedelta(minutes=settings.VERIFICATION_CODE_EXPIRE_MINUTES),
+        expires_at=now_kst()
+        + timedelta(minutes=settings.VERIFICATION_CODE_EXPIRE_MINUTES),
     )
     db.add(verification)
     db.commit()
 
     sent = await send_verification_email(user_in.email, code)
     if not sent:
-        raise HTTPException(status_code=500, detail="인증 이메일 발송에 실패했습니다. 잠시 후 다시 시도해주세요.")
+        raise HTTPException(
+            status_code=500,
+            detail="인증 이메일 발송에 실패했습니다. 잠시 후 다시 시도해주세요.",
+        )
 
     return {
         "message": "인증 코드가 이메일로 발송되었습니다.",
@@ -135,15 +161,20 @@ async def signup(request: Request, user_in: UserCreate, db: Session = Depends(ge
 
 # ── 프로젝트 오너 회원가입 (2단계 분리) ──────────────────────
 
+
 @router.post("/signup/project/check")
-async def check_project_eligibility(body: ProjectCheckRequest, db: Session = Depends(get_db)):
+async def check_project_eligibility(
+    body: ProjectCheckRequest, db: Session = Depends(get_db)
+):
     """
     프로젝트 오너 가입 1단계: 이메일로 재학생 + 프로젝트 참여 여부를 확인합니다.
     """
     # 같은 이메일 + PROJECT_OWNER 역할로 이미 가입되었는지 확인
     existing = _find_user_by_email_role(db, body.email, UserRole.PROJECT_OWNER)
     if existing:
-        raise HTTPException(status_code=400, detail="이미 프로젝트 오너로 가입된 이메일입니다.")
+        raise HTTPException(
+            status_code=400, detail="이미 프로젝트 오너로 가입된 이메일입니다."
+        )
 
     # 재학생 검증
     try:
@@ -169,10 +200,14 @@ async def check_project_eligibility(body: ProjectCheckRequest, db: Session = Dep
 
     # 이미 오너가 있는 프로젝트 표시
     taken_projects = set()
-    existing_owners = db.query(User.project_name).filter(
-        User.role == UserRole.PROJECT_OWNER,
-        User.project_name.isnot(None),
-    ).all()
+    existing_owners = (
+        db.query(User.project_name)
+        .filter(
+            User.role == UserRole.PROJECT_OWNER,
+            User.project_name.isnot(None),
+        )
+        .all()
+    )
     for (pname,) in existing_owners:
         taken_projects.add(pname)
 
@@ -195,25 +230,35 @@ async def signup_project(body: ProjectSignupRequest, db: Session = Depends(get_d
     """
     existing = _find_user_by_email_role(db, body.email, UserRole.PROJECT_OWNER)
     if existing:
-        raise HTTPException(status_code=400, detail="이미 프로젝트 오너로 가입된 이메일입니다.")
+        raise HTTPException(
+            status_code=400, detail="이미 프로젝트 오너로 가입된 이메일입니다."
+        )
 
     # 프로젝트당 오너 1명 제한
-    existing_owner = db.query(User).filter(
-        User.role == UserRole.PROJECT_OWNER,
-        User.project_name == body.project_name,
-        User.is_active == True,
-    ).first()
+    existing_owner = (
+        db.query(User)
+        .filter(
+            User.role == UserRole.PROJECT_OWNER,
+            User.project_name == body.project_name,
+            User.is_active == True,
+        )
+        .first()
+    )
     if existing_owner:
         raise HTTPException(
             status_code=409,
             detail=f"'{body.project_name}' 프로젝트에는 이미 오너가 등록되어 있습니다.",
         )
 
-    pending_owner = db.query(User).filter(
-        User.role == UserRole.PROJECT_OWNER,
-        User.project_name == body.project_name,
-        User.is_active == False,
-    ).first()
+    pending_owner = (
+        db.query(User)
+        .filter(
+            User.role == UserRole.PROJECT_OWNER,
+            User.project_name == body.project_name,
+            User.is_active == False,
+        )
+        .first()
+    )
     if pending_owner:
         raise HTTPException(
             status_code=409,
@@ -258,7 +303,8 @@ async def signup_project(body: ProjectSignupRequest, db: Session = Depends(get_d
         signup_role="project_owner",
         project_name=body.project_name,
         project_reason=body.reason,
-        expires_at=now_kst() + timedelta(minutes=settings.VERIFICATION_CODE_EXPIRE_MINUTES),
+        expires_at=now_kst()
+        + timedelta(minutes=settings.VERIFICATION_CODE_EXPIRE_MINUTES),
     )
     db.add(verification)
     db.commit()
@@ -277,9 +323,12 @@ async def signup_project(body: ProjectSignupRequest, db: Session = Depends(get_d
 
 # ── 이메일 인증 (공통) ──────────────────────────────────────
 
+
 @router.post("/verify")
 @limiter.limit("10/minute")
-async def verify_email(request: Request, body: VerifyCodeRequest, db: Session = Depends(get_db)):
+async def verify_email(
+    request: Request, body: VerifyCodeRequest, db: Session = Depends(get_db)
+):
     """
     회원가입 2단계: 인증 코드를 확인하고 계정을 생성합니다.
     같은 이메일이라도 role이 다르면 별도 계정으로 생성됩니다.
@@ -295,13 +344,21 @@ async def verify_email(request: Request, body: VerifyCodeRequest, db: Session = 
     )
 
     if not record:
-        raise HTTPException(status_code=400, detail="인증 요청을 찾을 수 없습니다. 회원가입을 다시 진행해주세요.")
+        raise HTTPException(
+            status_code=400,
+            detail="인증 요청을 찾을 수 없습니다. 회원가입을 다시 진행해주세요.",
+        )
 
     if now_kst() > record.expires_at:
-        raise HTTPException(status_code=400, detail="인증 코드가 만료되었습니다. 코드를 재발송해주세요.")
+        raise HTTPException(
+            status_code=400, detail="인증 코드가 만료되었습니다. 코드를 재발송해주세요."
+        )
 
     if record.attempts >= 5:
-        raise HTTPException(status_code=429, detail="인증 시도 횟수를 초과했습니다. 코드를 재발송해주세요.")
+        raise HTTPException(
+            status_code=429,
+            detail="인증 시도 횟수를 초과했습니다. 코드를 재발송해주세요.",
+        )
 
     if record.code != body.code.strip():
         record.attempts = (record.attempts or 0) + 1
@@ -361,6 +418,7 @@ async def verify_email(request: Request, body: VerifyCodeRequest, db: Session = 
 
 
 # ── 관리자: 프로젝트 오너 승인/거절 ─────────────────────────
+
 
 @router.get("/pending-approvals")
 async def get_pending_approvals(
@@ -431,7 +489,9 @@ async def reject_project_owner(
         raise HTTPException(status_code=404, detail="사용자를 찾을 수 없습니다.")
 
     if user.is_active:
-        raise HTTPException(status_code=400, detail="이미 승인된 사용자는 거절할 수 없습니다.")
+        raise HTTPException(
+            status_code=400, detail="이미 승인된 사용자는 거절할 수 없습니다."
+        )
 
     db.delete(user)
     db.commit()
@@ -441,9 +501,12 @@ async def reject_project_owner(
 
 # ── 인증 코드 재발송 ────────────────────────────────────────
 
+
 @router.post("/resend-code")
 @limiter.limit("3/minute")
-async def resend_code(request: Request, body: ResendCodeRequest, db: Session = Depends(get_db)):
+async def resend_code(
+    request: Request, body: ResendCodeRequest, db: Session = Depends(get_db)
+):
     """인증 코드를 재발송합니다."""
     latest = (
         db.query(EmailVerification)
@@ -480,7 +543,8 @@ async def resend_code(request: Request, body: ResendCodeRequest, db: Session = D
         signup_role=signup_role,
         project_name=project_name,
         project_reason=project_reason,
-        expires_at=now_kst() + timedelta(minutes=settings.VERIFICATION_CODE_EXPIRE_MINUTES),
+        expires_at=now_kst()
+        + timedelta(minutes=settings.VERIFICATION_CODE_EXPIRE_MINUTES),
     )
     try:
         db.add(new_record)
@@ -501,20 +565,27 @@ async def resend_code(request: Request, body: ResendCodeRequest, db: Session = D
 
 # ── 로그인 ──────────────────────────────────────────────────
 
+
 @router.post("/login", response_model=Token)
 @limiter.limit("10/minute")
 async def login(
     request: Request,
     db: Session = Depends(get_db),
     form_data: OAuth2PasswordRequestForm = Depends(),
-    login_role: str = Query(default="user", description="로그인 역할: user 또는 project_owner"),
+    login_role: str = Query(
+        default="user", description="로그인 역할: user 또는 project_owner"
+    ),
 ):
     """
     로그인을 수행하고 JWT 토큰 쌍을 발급합니다.
     같은 이메일로 일반/프로젝트 오너 계정이 모두 있을 수 있으므로 role로 구분합니다.
     """
     # role 매핑
-    role_map = {"user": UserRole.USER, "project_owner": UserRole.PROJECT_OWNER, "admin": UserRole.ADMIN}
+    role_map = {
+        "user": UserRole.USER,
+        "project_owner": UserRole.PROJECT_OWNER,
+        "admin": UserRole.ADMIN,
+    }
     target_role = role_map.get(login_role)
 
     if target_role:
@@ -526,7 +597,11 @@ async def login(
     if not user and login_role == "user":
         user = _find_user_by_email_role(db, form_data.username, UserRole.ADMIN)
 
-    if not user or not user.hashed_password or not verify_password(form_data.password, user.hashed_password):
+    if (
+        not user
+        or not user.hashed_password
+        or not verify_password(form_data.password, user.hashed_password)
+    ):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="이메일 또는 비밀번호가 일치하지 않습니다.",
@@ -546,6 +621,7 @@ async def login(
 
 
 # ── 토큰 갱신 ───────────────────────────────────────────────
+
 
 @router.post("/refresh")
 async def refresh_token(
@@ -590,6 +666,7 @@ async def refresh_token(
 
 # ── 내 정보 ─────────────────────────────────────────────────
 
+
 @router.get("/me")
 async def read_users_me(current_user: User = Depends(get_current_user)):
     """현재 로그인된 사용자의 정보를 조회합니다."""
@@ -610,20 +687,55 @@ async def read_users_me(current_user: User = Depends(get_current_user)):
 
 # ── 비밀번호 재설정 ──────────────────────────────────────────
 
+
+_RESET_ROLE_MAP = {"user": UserRole.USER, "project_owner": UserRole.PROJECT_OWNER}
+
+
+def _reset_signup_role(login_role: str) -> str:
+    """role별로 인증 레코드를 분리하기 위한 signup_role 인코딩."""
+    return f"password_reset:{login_role}"
+
+
 @router.post("/password-reset/request")
 @limiter.limit("3/minute")
-async def request_password_reset(request: Request, body: PasswordResetRequest, db: Session = Depends(get_db)):
-    """비밀번호 재설정 1단계: 이메일로 인증 코드를 발송합니다."""
-    # 해당 이메일의 활성 계정이 있는지 확인 (역할 무관)
-    user = db.query(User).filter(User.email == body.email, User.is_active == True).first()
+async def request_password_reset(
+    request: Request, body: PasswordResetRequest, db: Session = Depends(get_db)
+):
+    """비밀번호 재설정 1단계: 이메일+role로 인증 코드를 발송합니다."""
+    target_role = _RESET_ROLE_MAP[body.login_role]
+    # 해당 이메일+role의 활성 계정이 있는지 확인
+    user = (
+        db.query(User)
+        .filter(
+            User.email == body.email,
+            User.role == target_role,
+            User.is_active == True,
+        )
+        .first()
+    )
+    # ADMIN은 user 탭으로 재설정 가능 (로그인과 동일 정책)
+    if not user and body.login_role == "user":
+        user = (
+            db.query(User)
+            .filter(
+                User.email == body.email,
+                User.role == UserRole.ADMIN,
+                User.is_active == True,
+            )
+            .first()
+        )
     if not user:
         # 보안상 존재하지 않는 이메일이어도 같은 메시지 반환
-        return {"message": "등록된 이메일이라면 인증 코드가 발송됩니다.", "email": body.email}
+        return {
+            "message": "등록된 이메일이라면 인증 코드가 발송됩니다.",
+            "email": body.email,
+        }
 
-    # 기존 미인증 비밀번호 재설정 레코드 삭제
+    sr = _reset_signup_role(body.login_role)
+    # 기존 미인증 비밀번호 재설정 레코드 삭제 (같은 role만)
     db.query(EmailVerification).filter(
         EmailVerification.email == body.email,
-        EmailVerification.signup_role == "password_reset",
+        EmailVerification.signup_role == sr,
         EmailVerification.verified == False,
     ).delete()
     db.commit()
@@ -633,8 +745,9 @@ async def request_password_reset(request: Request, body: PasswordResetRequest, d
         email=body.email,
         hashed_password="",  # 재설정이므로 기존 비밀번호 불필요
         code=code,
-        signup_role="password_reset",
-        expires_at=now_kst() + timedelta(minutes=settings.VERIFICATION_CODE_EXPIRE_MINUTES),
+        signup_role=sr,
+        expires_at=now_kst()
+        + timedelta(minutes=settings.VERIFICATION_CODE_EXPIRE_MINUTES),
     )
     db.add(verification)
     db.commit()
@@ -643,18 +756,25 @@ async def request_password_reset(request: Request, body: PasswordResetRequest, d
     if not sent:
         raise HTTPException(status_code=500, detail="인증 이메일 발송에 실패했습니다.")
 
-    return {"message": "등록된 이메일이라면 인증 코드가 발송됩니다.", "email": body.email}
+    return {
+        "message": "등록된 이메일이라면 인증 코드가 발송됩니다.",
+        "email": body.email,
+    }
 
 
 @router.post("/password-reset/confirm")
 @limiter.limit("5/minute")
-async def confirm_password_reset(request: Request, body: PasswordResetConfirm, db: Session = Depends(get_db)):
-    """비밀번호 재설정 2단계: 인증 코드 확인 + 새 비밀번호 설정."""
+async def confirm_password_reset(
+    request: Request, body: PasswordResetConfirm, db: Session = Depends(get_db)
+):
+    """비밀번호 재설정 2단계: 인증 코드 확인 + 해당 role 계정의 비밀번호만 변경."""
+    target_role = _RESET_ROLE_MAP[body.login_role]
+    sr = _reset_signup_role(body.login_role)
     record = (
         db.query(EmailVerification)
         .filter(
             EmailVerification.email == body.email,
-            EmailVerification.signup_role == "password_reset",
+            EmailVerification.signup_role == sr,
             EmailVerification.verified == False,
         )
         .order_by(EmailVerification.created_at.desc())
@@ -663,10 +783,14 @@ async def confirm_password_reset(request: Request, body: PasswordResetConfirm, d
     )
 
     if not record:
-        raise HTTPException(status_code=400, detail="비밀번호 재설정 요청을 찾을 수 없습니다.")
+        raise HTTPException(
+            status_code=400, detail="비밀번호 재설정 요청을 찾을 수 없습니다."
+        )
 
     if now_kst() > record.expires_at:
-        raise HTTPException(status_code=400, detail="인증 코드가 만료되었습니다. 다시 요청해주세요.")
+        raise HTTPException(
+            status_code=400, detail="인증 코드가 만료되었습니다. 다시 요청해주세요."
+        )
 
     if (record.attempts or 0) >= 5:
         raise HTTPException(
@@ -680,15 +804,31 @@ async def confirm_password_reset(request: Request, body: PasswordResetConfirm, d
         db.commit()
         raise HTTPException(status_code=400, detail="인증 코드가 일치하지 않습니다.")
 
-    # 해당 이메일의 모든 활성 계정 비밀번호 변경
-    users = db.query(User).filter(User.email == body.email, User.is_active == True).all()
-    if not users:
+    # 해당 이메일+role의 활성 계정만 비밀번호 변경
+    user = (
+        db.query(User)
+        .filter(
+            User.email == body.email,
+            User.role == target_role,
+            User.is_active == True,
+        )
+        .first()
+    )
+    # ADMIN은 user 탭으로 재설정 가능 (로그인과 동일 정책)
+    if not user and body.login_role == "user":
+        user = (
+            db.query(User)
+            .filter(
+                User.email == body.email,
+                User.role == UserRole.ADMIN,
+                User.is_active == True,
+            )
+            .first()
+        )
+    if not user:
         raise HTTPException(status_code=404, detail="계정을 찾을 수 없습니다.")
 
-    new_hash = get_password_hash(body.new_password)
-    for user in users:
-        user.hashed_password = new_hash
-
+    user.hashed_password = get_password_hash(body.new_password)
     db.delete(record)
     db.commit()
 
@@ -697,10 +837,6 @@ async def confirm_password_reset(request: Request, body: PasswordResetConfirm, d
 
 # ── 비밀번호 변경 (로그인 상태) ─────────────────────────────
 
-class ChangePasswordRequest(_BM):
-    current_password: str
-    new_password: str
-
 
 @router.put("/change-password")
 async def change_password(
@@ -708,16 +844,20 @@ async def change_password(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """로그인한 사용자의 비밀번호를 변경합니다."""
+    """로그인한 사용자의 비밀번호를 변경합니다.
+
+    같은 이메일로 여러 role 계정이 있어도 현재 로그인된 row 1건만 갱신합니다.
+    (USER와 PROJECT_OWNER는 별개 계정으로 취급)
+    """
     if not current_user.hashed_password:
-        raise HTTPException(status_code=400, detail="OAuth 계정은 비밀번호 변경이 불가합니다.")
+        raise HTTPException(
+            status_code=400, detail="OAuth 계정은 비밀번호 변경이 불가합니다."
+        )
 
     if not verify_password(body.current_password, current_user.hashed_password):
-        raise HTTPException(status_code=400, detail="현재 비밀번호가 일치하지 않습니다.")
-
-    _pw_pat = re.compile(r'^(?=.*[a-zA-Z])(?=.*\d)(?=.*[!@#$%^&*()_+\-=\[\]{}|;:\'",.<>?/~`]).{8,}$')
-    if not _pw_pat.match(body.new_password):
-        raise HTTPException(status_code=400, detail="비밀번호는 8자 이상, 영문+숫자+특수기호를 포함해야 합니다.")
+        raise HTTPException(
+            status_code=400, detail="현재 비밀번호가 일치하지 않습니다."
+        )
 
     current_user.hashed_password = get_password_hash(body.new_password)
     db.commit()
@@ -750,7 +890,9 @@ async def upload_avatar(
 ):
     """프로필 사진 업로드 (최대 2MB, jpeg/png/webp)"""
     if file.content_type not in ALLOWED_AVATAR_TYPES:
-        raise HTTPException(status_code=400, detail="jpg, png, webp 이미지만 업로드 가능합니다.")
+        raise HTTPException(
+            status_code=400, detail="jpg, png, webp 이미지만 업로드 가능합니다."
+        )
 
     contents = await file.read()
     if len(contents) > MAX_AVATAR_SIZE:
@@ -763,7 +905,11 @@ async def upload_avatar(
             old_path.unlink(missing_ok=True)
 
     # 저장 (확장자 화이트리스트)
-    ext = file.filename.rsplit(".", 1)[-1].lower() if file.filename and "." in file.filename else ""
+    ext = (
+        file.filename.rsplit(".", 1)[-1].lower()
+        if file.filename and "." in file.filename
+        else ""
+    )
     if ext not in ALLOWED_AVATAR_EXTENSIONS:
         ext = "png"
     filename = f"{current_user.id}_{int(time.time())}.{ext}"
@@ -796,6 +942,7 @@ async def delete_avatar(
 
 
 # ── 로그아웃 ────────────────────────────────────────────────
+
 
 @router.post("/logout")
 async def logout():
