@@ -41,13 +41,19 @@ def _notify_admins_background_failure(task_name: str, consecutive_failures: int)
     db = None
     try:
         db = SessionLocal()
-        admins = db.query(User).filter(User.role == UserRole.ADMIN, User.is_active == True).all()
+        admins = (
+            db.query(User)
+            .filter(User.role == UserRole.ADMIN, User.is_active == True)
+            .all()
+        )
         for admin in admins:
-            db.add(Notification(
-                user_id=admin.id,
-                type="error",
-                message=f"[{task_name}] 백그라운드 태스크 연속 {consecutive_failures}회 실패 — 점검이 필요합니다.",
-            ))
+            db.add(
+                Notification(
+                    user_id=admin.id,
+                    type="error",
+                    message=f"[{task_name}] 백그라운드 태스크 연속 {consecutive_failures}회 실패 — 점검이 필요합니다.",
+                )
+            )
         db.commit()
     except Exception as notify_err:
         if db:
@@ -56,6 +62,7 @@ def _notify_admins_background_failure(task_name: str, consecutive_failures: int)
     finally:
         if db:
             db.close()
+
 
 # Rate Limiter
 limiter = Limiter(key_func=get_remote_address)
@@ -150,12 +157,18 @@ async def _expire_vms_loop():
             if db:
                 db.rollback()
             consecutive_failures += 1
-            logger.error(f"[expire] 백그라운드 태스크 오류 ({consecutive_failures}회 연속): {e}")
+            logger.error(
+                f"[expire] 백그라운드 태스크 오류 ({consecutive_failures}회 연속): {e}"
+            )
             if consecutive_failures == 5:
-                logger.critical(f"[expire] 백그라운드 태스크 연속 {consecutive_failures}회 실패 — 점검 필요")
+                logger.critical(
+                    f"[expire] 백그라운드 태스크 연속 {consecutive_failures}회 실패 — 점검 필요"
+                )
                 try:
                     await asyncio.to_thread(
-                        _notify_admins_background_failure, "expire", consecutive_failures
+                        _notify_admins_background_failure,
+                        "expire",
+                        consecutive_failures,
                     )
                 except Exception as notify_err:
                     logger.error(f"[expire] 관리자 알림 발송 실패: {notify_err}")
@@ -260,7 +273,6 @@ async def _daily_snapshot_loop():
 
             # ── 00:00 — 기존 auto-daily 스냅샷 삭제 ──
             logger.info("[auto-snap] 기존 자동 스냅샷 삭제 시작")
-            from sqlalchemy.orm import joinedload as _joinedload
             db = SessionLocal()
             try:
                 vms = (
@@ -342,12 +354,18 @@ async def _daily_snapshot_loop():
             if db:
                 db.rollback()
             consecutive_failures += 1
-            logger.error(f"[auto-snap] 백그라운드 태스크 오류 ({consecutive_failures}회 연속): {e}")
+            logger.error(
+                f"[auto-snap] 백그라운드 태스크 오류 ({consecutive_failures}회 연속): {e}"
+            )
             if consecutive_failures == 5:
-                logger.critical(f"[auto-snap] 백그라운드 태스크 연속 {consecutive_failures}회 실패 — 점검 필요")
+                logger.critical(
+                    f"[auto-snap] 백그라운드 태스크 연속 {consecutive_failures}회 실패 — 점검 필요"
+                )
                 try:
                     await asyncio.to_thread(
-                        _notify_admins_background_failure, "auto-snap", consecutive_failures
+                        _notify_admins_background_failure,
+                        "auto-snap",
+                        consecutive_failures,
                     )
                 except Exception as notify_err:
                     logger.error(f"[auto-snap] 관리자 알림 발송 실패: {notify_err}")
