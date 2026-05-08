@@ -32,7 +32,7 @@ EOF
     exit 0
 fi
 
-if echo "$COMMAND" | grep -qE "rm\s+-rf?\s+.*(api|services|frontend|models|core|schemas)/"; then
+if echo "$COMMAND" | grep -qE "rm\s+-rf?\s+.*(api|services|frontend|models|core|schemas)\b"; then
     cat <<'EOF'
 {
   "decision": "block",

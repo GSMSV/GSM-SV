@@ -30,7 +30,7 @@ if echo "$FILE" | grep -q "\.py$"; then
 fi
 
 if echo "$FILE" | grep -qE "\.(ts|tsx)$"; then
-    FRONTEND_DIR=$(echo "$FILE" | grep -oE ".*/frontend")
+    FRONTEND_DIR=$(echo "$FILE" | grep -oE "^frontend|.*/frontend")
     if [ -n "$FRONTEND_DIR" ] && [ -f "$FRONTEND_DIR/tsconfig.json" ]; then
         RESULT=$(cd "$FRONTEND_DIR" && npx tsc --noEmit 2>&1)
         if [ $? -ne 0 ]; then

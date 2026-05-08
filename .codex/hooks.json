@@ -32,22 +32,6 @@
             "command": "if command -v osascript >/dev/null 2>&1; then osascript -e 'display notification \"Codex has finished working\" with title \"Codex\"'; elif command -v notify-send >/dev/null 2>&1; then notify-send 'Codex' \"Codex has finished working\"; fi"
           }
         ]
-      },
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "if command -v osascript >/dev/null 2>&1; then osascript -e 'display notification \"Codex has finished working\" with title \"Codex\"'; elif command -v notify-send >/dev/null 2>&1; then notify-send 'Codex' \"Codex has finished working\"; fi"
-          }
-        ]
-      },
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "if command -v osascript >/dev/null 2>&1; then osascript -e 'display notification \"Codex has finished working\" with title \"Codex\"'; elif command -v notify-send >/dev/null 2>&1; then notify-send 'Codex' \"Codex has finished working\"; fi"
-          }
-        ]
       }
     ]
   }
