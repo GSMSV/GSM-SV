@@ -36,6 +36,12 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+BACKGROUND_FAILURE_NOTIFY_THRESHOLD = 5
+BACKGROUND_FAST_RETRY_SECONDS = 300
+EXPIRE_LOOP_INTERVAL_SECONDS = 3600
+IPTABLES_BACKUP_INTERVAL_SECONDS = 7 * 24 * 3600
+SNAPSHOT_CREATE_DELAY_SECONDS = 60
+
 
 def _notify_admins_background_failure(task_name: str, consecutive_failures: int):
     db = None
@@ -58,7 +64,10 @@ def _notify_admins_background_failure(task_name: str, consecutive_failures: int)
     except Exception as notify_err:
         if db:
             db.rollback()
-        logger.warning(f"[{task_name}] 관리자 알림 생성 실패: {notify_err}")
+        logger.warning(
+            f"[{task_name}] 관리자 알림 생성 실패: {notify_err}",
+            exc_info=True,
+        )
     finally:
         if db:
             db.close()
@@ -157,13 +166,14 @@ async def _expire_vms_loop():
             if db:
                 db.rollback()
             consecutive_failures += 1
-            logger.error(
+            logger.exception(
                 f"[expire] 백그라운드 태스크 오류 ({consecutive_failures}회 연속): {e}"
             )
-            if consecutive_failures == 5:
+            if consecutive_failures >= BACKGROUND_FAILURE_NOTIFY_THRESHOLD:
                 logger.critical(
                     f"[expire] 백그라운드 태스크 연속 {consecutive_failures}회 실패 — 점검 필요"
                 )
+            if consecutive_failures == BACKGROUND_FAILURE_NOTIFY_THRESHOLD:
                 try:
                     await asyncio.to_thread(
                         _notify_admins_background_failure,
@@ -171,15 +181,15 @@ async def _expire_vms_loop():
                         consecutive_failures,
                     )
                 except Exception as notify_err:
-                    logger.error(f"[expire] 관리자 알림 발송 실패: {notify_err}")
+                    logger.exception(f"[expire] 관리자 알림 발송 실패: {notify_err}")
         finally:
             if db:
                 db.close()
 
         if consecutive_failures > 0:
-            await asyncio.sleep(300)
+            await asyncio.sleep(BACKGROUND_FAST_RETRY_SECONDS)
         else:
-            await asyncio.sleep(3600)
+            await asyncio.sleep(EXPIRE_LOOP_INTERVAL_SECONDS)
 
 
 async def _iptables_weekly_backup_loop():
@@ -188,9 +198,11 @@ async def _iptables_weekly_backup_loop():
     from models.server import Server
     from services.network_service import _backup_iptables
 
+    consecutive_failures = 0
     while True:
-        db = SessionLocal()
+        db = None
         try:
+            db = SessionLocal()
             servers = db.query(Server).all()
 
             seen_gateways = set()
@@ -199,6 +211,7 @@ async def _iptables_weekly_backup_loop():
                     continue
                 seen_gateways.add(server.gateway_ip)
 
+                ssh = None
                 try:
                     ssh = paramiko.SSHClient()
                     ssh.set_missing_host_key_policy(paramiko.WarningPolicy())
@@ -209,17 +222,45 @@ async def _iptables_weekly_backup_loop():
                         timeout=10,
                     )
                     _backup_iptables(ssh, server.gateway_ip)
-                    ssh.close()
                 except Exception as e:
                     logger.warning(
-                        f"[weekly-backup] {server.gateway_ip} 백업 실패: {e}"
+                        f"[weekly-backup] {server.gateway_ip} 백업 실패: {e}",
+                        exc_info=True,
                     )
+                finally:
+                    if ssh:
+                        ssh.close()
+            consecutive_failures = 0
         except Exception as e:
-            logger.error(f"[weekly-backup] 백그라운드 태스크 오류: {e}")
+            if db:
+                db.rollback()
+            consecutive_failures += 1
+            logger.exception(
+                f"[weekly-backup] 백그라운드 태스크 오류 ({consecutive_failures}회 연속): {e}"
+            )
+            if consecutive_failures >= BACKGROUND_FAILURE_NOTIFY_THRESHOLD:
+                logger.critical(
+                    f"[weekly-backup] 백그라운드 태스크 연속 {consecutive_failures}회 실패 — 점검 필요"
+                )
+            if consecutive_failures == BACKGROUND_FAILURE_NOTIFY_THRESHOLD:
+                try:
+                    await asyncio.to_thread(
+                        _notify_admins_background_failure,
+                        "weekly-backup",
+                        consecutive_failures,
+                    )
+                except Exception as notify_err:
+                    logger.exception(
+                        f"[weekly-backup] 관리자 알림 발송 실패: {notify_err}"
+                    )
         finally:
-            db.close()
+            if db:
+                db.close()
 
-        await asyncio.sleep(7 * 24 * 3600)  # 7일마다
+        if consecutive_failures > 0:
+            await asyncio.sleep(BACKGROUND_FAST_RETRY_SECONDS)
+        else:
+            await asyncio.sleep(IPTABLES_BACKUP_INTERVAL_SECONDS)
 
 
 AUTO_SNAP_PREFIX = "auto-daily"
@@ -287,6 +328,7 @@ async def _daily_snapshot_loop():
                 db.expunge_all()
             finally:
                 db.close()
+                db = None
 
             wait_tasks = []
             for vm_name, vmid, server in delete_targets:
@@ -315,7 +357,7 @@ async def _daily_snapshot_loop():
                 await asyncio.gather(*wait_tasks, return_exceptions=True)
 
             # ── 00:01 — 새 스냅샷 생성 ──
-            await asyncio.sleep(60)
+            await asyncio.sleep(SNAPSHOT_CREATE_DELAY_SECONDS)
 
             today_str = now_kst().strftime("%Y%m%d")
             snap_name = f"{AUTO_SNAP_PREFIX}-{today_str}"
@@ -336,6 +378,7 @@ async def _daily_snapshot_loop():
                 db.expunge_all()
             finally:
                 db.close()
+                db = None
 
             for vm_name, vmid, server in create_targets:
                 try:
@@ -354,13 +397,14 @@ async def _daily_snapshot_loop():
             if db:
                 db.rollback()
             consecutive_failures += 1
-            logger.error(
+            logger.exception(
                 f"[auto-snap] 백그라운드 태스크 오류 ({consecutive_failures}회 연속): {e}"
             )
-            if consecutive_failures == 5:
+            if consecutive_failures >= BACKGROUND_FAILURE_NOTIFY_THRESHOLD:
                 logger.critical(
                     f"[auto-snap] 백그라운드 태스크 연속 {consecutive_failures}회 실패 — 점검 필요"
                 )
+            if consecutive_failures == BACKGROUND_FAILURE_NOTIFY_THRESHOLD:
                 try:
                     await asyncio.to_thread(
                         _notify_admins_background_failure,
@@ -368,13 +412,13 @@ async def _daily_snapshot_loop():
                         consecutive_failures,
                     )
                 except Exception as notify_err:
-                    logger.error(f"[auto-snap] 관리자 알림 발송 실패: {notify_err}")
+                    logger.exception(f"[auto-snap] 관리자 알림 발송 실패: {notify_err}")
         finally:
             if db:
                 db.close()
 
         if consecutive_failures > 0:
-            await asyncio.sleep(300)
+            await asyncio.sleep(BACKGROUND_FAST_RETRY_SECONDS)
 
 
 async def _oauth_store_cleanup_loop():
@@ -385,8 +429,8 @@ async def _oauth_store_cleanup_loop():
         try:
             _cleanup_stores()
         except Exception as e:
-            logger.warning(f"[oauth-cleanup] 정리 실패: {e}")
-        await asyncio.sleep(300)  # 5분마다
+            logger.warning(f"[oauth-cleanup] 정리 실패: {e}", exc_info=True)
+        await asyncio.sleep(BACKGROUND_FAST_RETRY_SECONDS)  # 5분마다
 
 
 @asynccontextmanager
