@@ -121,7 +121,7 @@ async def _expire_vms_loop():
                 db.rollback()
             consecutive_failures += 1
             logger.error(f"[expire] 백그라운드 태스크 오류 ({consecutive_failures}회 연속): {e}")
-            if consecutive_failures >= 5 and consecutive_failures % 5 == 0:
+            if consecutive_failures == 5:
                 logger.critical(f"[expire] 백그라운드 태스크 연속 {consecutive_failures}회 실패 — 점검 필요")
                 try:
                     await asyncio.to_thread(
@@ -259,7 +259,7 @@ async def _daily_snapshot_loop():
                 db.rollback()
             consecutive_failures += 1
             logger.error(f"[auto-snap] 백그라운드 태스크 오류 ({consecutive_failures}회 연속): {e}")
-            if consecutive_failures >= 5 and consecutive_failures % 5 == 0:
+            if consecutive_failures == 5:
                 logger.critical(f"[auto-snap] 백그라운드 태스크 연속 {consecutive_failures}회 실패 — 점검 필요")
                 try:
                     await asyncio.to_thread(
