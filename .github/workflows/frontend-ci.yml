@@ -1,24 +1,19 @@
-name: CI
+name: Frontend CI
 
 on:
   push:
     branches: [develop, main]
+    paths:
+      - 'frontend/**'
+      - '.github/workflows/frontend-ci.yml'
   pull_request:
     branches: [develop, main]
+    paths:
+      - 'frontend/**'
+      - '.github/workflows/frontend-ci.yml'
 
 jobs:
-  backend-lint:
-    name: Backend Lint (ruff)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - run: pip install ruff
-      - run: ruff check .
-
-  frontend:
+  build:
     name: Frontend Build & Lint
     runs-on: ubuntu-latest
     defaults:

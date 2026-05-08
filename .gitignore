@@ -33,12 +33,12 @@ backups/
 uploads/
 
 # Docker
-Dockerfile
+backend/Dockerfile
 frontend/Dockerfile
 docker-compose.yml
-.dockerignore
+backend/.dockerignore
 frontend/.dockerignore
-nginx/
+backend/nginx/
 
 # Claude (개인 설정만 제외, 팀 공통 설정은 추적)
 .claude/settings.local.json
