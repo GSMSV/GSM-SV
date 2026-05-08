@@ -310,6 +310,59 @@ class TestChangePassword:
         assert "password_reset:user" in roles
         assert "password_reset:project_owner" in roles
 
+    def test_password_reset_confirm_rejects_code_for_other_role(self, client, db):
+        """PO 재설정 코드를 user role로 confirm하면 실패하고 양쪽 비밀번호는 유지된다."""
+        from datetime import timedelta
+
+        from core.timezone import now_kst
+        from models.email_verification import EmailVerification
+
+        user_row = User(
+            email="cross-reset@gsm.hs.kr",
+            hashed_password=get_password_hash("UserPass1!"),
+            role=UserRole.USER,
+            is_active=True,
+        )
+        po_row = User(
+            email="cross-reset@gsm.hs.kr",
+            hashed_password=get_password_hash("OwnerPass1!"),
+            role=UserRole.PROJECT_OWNER,
+            is_active=True,
+        )
+        reset_record = EmailVerification(
+            email="cross-reset@gsm.hs.kr",
+            hashed_password="",
+            code="654321",
+            signup_role="password_reset:project_owner",
+            expires_at=now_kst() + timedelta(minutes=10),
+            verified=False,
+            attempts=0,
+        )
+        db.add_all([user_row, po_row, reset_record])
+        db.commit()
+
+        res = client.post(
+            "/api/v1/auth/password-reset/confirm",
+            json={
+                "email": "cross-reset@gsm.hs.kr",
+                "code": "654321",
+                "new_password": "NewPass2@",
+                "login_role": "user",
+            },
+        )
+        assert res.status_code == 400, res.text
+        assert "재설정 요청" in res.json()["detail"]
+
+        db.expire_all()
+        user_reloaded = db.query(User).filter_by(id=user_row.id).first()
+        po_reloaded = db.query(User).filter_by(id=po_row.id).first()
+        record_reloaded = (
+            db.query(EmailVerification).filter_by(id=reset_record.id).first()
+        )
+        assert verify_password("UserPass1!", user_reloaded.hashed_password)
+        assert verify_password("OwnerPass1!", po_reloaded.hashed_password)
+        assert record_reloaded is not None
+
     def test_password_reset_request_role_mismatch_silently_succeeds(self, client, db):
         """존재하지 않는 role 조합 요청도 보안상 같은 메시지 — 레코드는 생성 안 됨."""
         from models.email_verification import EmailVerification
