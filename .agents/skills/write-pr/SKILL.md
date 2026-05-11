@@ -1,22 +1,22 @@
 ---
-name: "write-pr"
-description: "develop \ube0c\ub79c\uce58 \uae30\uc900 \ucee4\ubc0b\uc744 \ubd84\uc11d\ud574 PR \uc81c\ubaa9\uacfc \ubcf8\ubb38\uc744 \uc0dd\uc131\ud558\uace0 GitHub PR\uc744 \ub9cc\ub4ed\ub2c8\ub2e4. GSMSV \ud504\ub85c\uc81d\ud2b8 \ucee8\ubca4\uc158\uc744 \ub530\ub985\ub2c8\ub2e4."
+name: write-pr
+description: Analyze commits against develop, generate a PR title/body, and create a GitHub PR. Follow GSMSV project conventions.
 ---
 
-## Step 1 — 컨텍스트 수집
+## Step 1 — Gather context
 
 ```bash
 git branch --show-current
 ```
 
-현재 브랜치가 `develop` 또는 `main`이면 즉시 중단:
+If the current branch is `develop` or `main`, stop immediately:
 
 ```
-현재 브랜치: develop
-feature 브랜치를 먼저 생성하세요 (/new-branch)
+Current branch: develop
+Create a feature branch first (/new-branch)
 ```
 
-feature 브랜치면 계속 진행:
+If on a feature branch, continue:
 
 ```bash
 git log origin/develop..HEAD --oneline
@@ -24,17 +24,17 @@ git diff origin/develop...HEAD --stat
 git diff origin/develop...HEAD
 ```
 
-## Step 2 — PR 제목 생성
+## Step 2 — Create PR title
 
 Format: `type: 한국어 설명`
 
-- commit 컨벤션과 동일한 type prefix 사용 (`feat` / `fix` / `update` / `docs` 등)
-- 한국어, 간결하게, 마침표 없음, 50자 이내
-- 3개 옵션 생성 후 가장 적합한 것에 `← 추천` 표시
+- Use the same type prefix as commit convention (`feat` / `fix` / `update` / `docs`, etc.)
+- Korean, concise, no period, within 50 characters
+- Generate 3 options and mark the best with `← recommended`
 
-## Step 3 — PR 본문 생성
+## Step 3 — Create PR body
 
-아래 템플릿을 **그대로** 사용 (구조 변경 금지):
+Use the template **exactly as-is** (do not change structure):
 
 ```markdown
 ## Summary
@@ -49,27 +49,27 @@ Format: `type: 한국어 설명`
 ```
 
 Rules:
-- Summary는 bullet point로 변경 내용을 구체적으로 작성
-- Test plan은 실제 테스트 가능한 항목만 포함
-- 내용이 없는 섹션도 삭제하지 말고 비워둘 것
+- Summary uses bullet points with concrete changes
+- Test plan includes only real, runnable items
+- Do not delete empty sections
 
-## Step 4 — 미리보기 & 확인
+## Step 4 — Preview & confirm
 
 ```
-## 추천 PR 제목
+## Recommended PR titles
 1. [title1]
 2. [title2]
-3. [title3] ← 추천
+3. [title3] ← recommended
 
-## PR 본문 미리보기
+## PR body preview
 [body content]
 ```
 
-사용자에게 어떤 제목을 쓸지 확인. 응답 없으면 추천 옵션 사용.
+Ask the user which title to use. If no response, use the recommended option.
 
-## Step 5 — PR 생성
+## Step 5 — Create PR
 
-PR 본문에 `🤖 Generated with Claude Code` 등 워터마크를 **절대 포함하지 않는다**.
+Never include watermarks like `🤖 Generated with Claude Code` in the PR body.
 
 ```bash
 gh pr create \
@@ -87,4 +87,4 @@ EOF
 )"
 ```
 
-생성 후 PR URL을 출력한다.
+After creation, output the PR URL.

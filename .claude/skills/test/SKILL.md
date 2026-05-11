@@ -1,38 +1,38 @@
 ---
 name: test
-description: pytest 테스트를 실행하고 결과를 리포트합니다. 컨텍스트에 따라 테스트 범위를 결정하고 실패를 상세히 분석합니다. 전체 테스트는 꼭 필요한 경우에만 실행합니다.
+description: Run pytest tests and report results. Decide test scope by context and analyze failures in detail. Run the full suite only when necessary.
 ---
 
-다음 단계에 따라 테스트를 실행합니다:
+Run tests following these steps:
 
 ## Steps
 
-1. **테스트 범위 결정**:
-   - 특정 파일/모듈 언급 시: 관련 테스트 파일만 실행 (권장)
-   - 특정 기능 영역 변경 시: 해당 도메인 테스트만 실행
-   - 명시적으로 전체 실행 요청 시: 전체 실행
+1. **Decide test scope**:
+   - Specific file/module mentioned: run only related test files (recommended)
+   - Specific feature area changed: run tests for that domain
+   - Full run explicitly requested: run all tests
 
-2. **테스트 실행**:
+2. **Run tests**:
 
    ```bash
-   # 관련 테스트만 (권장)
+   # Related tests only (recommended)
    python -m pytest tests/test_{module}.py -v 2>&1
 
-   # 특정 함수
+   # Specific function
    python -m pytest tests/test_{module}.py::test_{function_name} -v 2>&1
 
-   # 전체 (꼭 필요한 경우만)
+   # Full suite (only when necessary)
    python -m pytest tests/ -v 2>&1
    ```
 
-3. **결과 분석**:
-   - 테스트 요약 표시
-   - 실패 시: 실패 메시지 및 traceback 표시, 근본 원인 분석
-   - 성공 시: 통과한 테스트 수 확인
+3. **Analyze results**:
+   - Show the test summary
+   - On failure: show error messages and traceback, analyze root cause
+   - On success: confirm number of tests passed
 
-4. **리포트**:
-   - 실행된 총 테스트 수
-   - 통과/실패 수
-   - 실패 시 수정 방향 제안
+4. **Report**:
+   - Total tests run
+   - Passed/failed counts
+   - If failures, suggest fixes
 
-테스트를 실행하지 않고 성공했다고 주장하지 않습니다.
+Do not claim success without running tests.

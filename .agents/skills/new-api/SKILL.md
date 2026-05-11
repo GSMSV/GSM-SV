@@ -1,6 +1,6 @@
 ---
-name: "new-api"
-description: "FastAPI \uc5d4\ub4dc\ud3ec\uc778\ud2b8\ub97c end-to-end\ub85c \uad6c\ud604\ud569\ub2c8\ub2e4 \u2014 \ubaa8\ub378 \u2192 \uc11c\ube44\uc2a4 \u2192 \ub77c\uc6b0\ud130 \u2192 \ud504\ub860\ud2b8\uc5d4\ub4dc API \ud568\uc218. GSMSV \ud504\ub85c\uc81d\ud2b8 \ucee8\ubca4\uc158\uc744 \ub530\ub985\ub2c8\ub2e4."
+name: new-api
+description: Implement a FastAPI endpoint end-to-end — model → service → router → frontend API function. Follow GSMSV project conventions.
 ---
 
 # New API Implementation Flow (GSMSV)
@@ -8,11 +8,11 @@ description: "FastAPI \uc5d4\ub4dc\ud3ec\uc778\ud2b8\ub97c end-to-end\ub85c \uad
 ## Directory Structure
 
 ```
-api/routes/{domain}.py        # 라우터
-services/{domain}_service.py  # 서비스 로직
-models/{Domain}.py            # SQLAlchemy 모델 (기존 재사용)
-frontend/lib/api.ts           # 프론트엔드 API 함수
-frontend/lib/types.ts         # 타입 정의
+api/routes/{domain}.py        # router
+services/{domain}_service.py  # service logic
+models/{Domain}.py            # SQLAlchemy model (reuse existing)
+frontend/lib/api.ts           # frontend API functions
+frontend/lib/types.ts         # type definitions
 ```
 
 ## Step 1 — Service Function
@@ -24,11 +24,11 @@ def create_{resource}(
     user: User,
     data: Create{Resource}Request,
 ) -> {Resource}Response:
-    # 권한 검증
+    # authorization
     if user.role not in [UserRole.ADMIN, UserRole.PROJECT_OWNER]:
-        raise HTTPException(status_code=403, detail="권한이 없습니다.")
+        raise HTTPException(status_code=403, detail="Permission denied.")
     
-    # 비즈니스 로직
+    # business logic
     item = {Resource}(
         field1=data.field1,
         user_id=user.id,
@@ -43,7 +43,7 @@ def create_{resource}(
 ## Step 2 — Pydantic Schemas
 
 ```python
-# api/routes/{domain}.py 상단 또는 별도 schemas 파일
+# top of api/routes/{domain}.py or separate schemas file
 
 class Create{Resource}Request(BaseModel):
     field1: str
@@ -78,7 +78,7 @@ async def get_{resource}(
 ):
     item = {domain}_service.get_{resource}(db, id)
     if not item:
-        raise HTTPException(status_code=404, detail="리소스를 찾을 수 없습니다.")
+        raise HTTPException(status_code=404, detail="Resource not found.")
     return item
 ```
 
@@ -115,12 +115,12 @@ export interface Create{Resource}Request {
 
 ## Checklist
 
-- [ ] 서비스 함수 구현 (권한 검증 포함)
-- [ ] Pydantic 요청/응답 스키마 작성
-- [ ] 라우터 엔드포인트 등록
-- [ ] `main.py` 에 라우터 include 확인
-- [ ] 프론트엔드 API 함수 추가
-- [ ] TypeScript 타입 정의 추가
-- [ ] HTTP 상태 코드 정확 (GET 200, POST 201)
-- [ ] 인증 의존성 (`Depends(get_current_user)`) 포함
-- [ ] 역할 기반 접근 제어 적용 시 명시
+- [ ] Implement service function (including auth checks)
+- [ ] Write Pydantic request/response schemas
+- [ ] Register router endpoint
+- [ ] Confirm router is included in `main.py`
+- [ ] Add frontend API function
+- [ ] Add TypeScript type definitions
+- [ ] Correct HTTP status codes (GET 200, POST 201)
+- [ ] Include auth dependency (`Depends(get_current_user)`)
+- [ ] If RBAC is applied, make it explicit

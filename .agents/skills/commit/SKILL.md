@@ -1,32 +1,33 @@
 ---
-name: "commit"
-description: "GSMSV \ud504\ub85c\uc81d\ud2b8 \ucee8\ubca4\uc158\uc5d0 \ub530\ub77c Git \ucee4\ubc0b\uc744 \uc0dd\uc131\ud569\ub2c8\ub2e4. \ubcc0\uacbd\uc0ac\ud56d\uc744 \ub17c\ub9ac\uc801 \ub2e8\uc704\ub85c \ub098\ub204\uace0 \uc62c\ubc14\ub978 \ud0c0\uc785 prefix\uc640 \ud55c\uad6d\uc5b4 \uc124\uba85\uc73c\ub85c \ucee4\ubc0b\ud569\ub2c8\ub2e4."
+name: commit
+description: Create git commits following the GSMSV project convention. Split changes into logical units and commit with the correct type prefix and a Korean description.
+allowed-tools: Bash(git add:*), Bash(git status:*), Bash(git commit:*), Bash(git diff:*), Bash(git log:*)
 ---
 
 ## Commit Message Rules
 
 Format: `type: 설명`
 
-- **콜론 앞뒤 공백 없음** — 항상 `type: 설명`, `type : 설명` 사용 금지
+- **No spaces around the colon** — always `type: 설명`, never `type : 설명`
 - **Types** (English): `feat` / `fix` / `update` / `add` / `test` / `docs` / `style` / `perf` / `refactor` / `merge`
-- **Description**: 한국어, 마침표 없음, 간결하게
-- Subject line only (본문 없음)
-- **Co-Authored-By 포함 금지** — 워터마크 없이 클린한 커밋 메시지만
+- **Description**: Korean, no period, concise
+- Subject line only (no body)
+- **Do not include Co-Authored-By** — keep a clean commit message without watermarks
 
 ### Type Guide
 
 | Type | When to use |
 |------|------------|
-| `feat` | 새로운 기능 |
-| `add` | 파일, 설정, 의존성 추가 |
-| `fix` | 버그 수정 |
-| `update` | 기존 기능 수정 또는 리뷰 반영 |
-| `refactor` | 동작 변경 없는 코드 구조 개선 |
-| `test` | 테스트 추가 또는 수정 |
-| `docs` | 문서만 변경 |
-| `style` | 포맷팅, 린트 |
-| `perf` | 성능 개선 |
-| `merge` | 머지 커밋 |
+| `feat` | New feature |
+| `add` | Add file, config, or dependency |
+| `fix` | Bug fix |
+| `update` | Modify existing feature or apply review feedback |
+| `refactor` | Structural improvement without behavior change |
+| `test` | Add or change tests |
+| `docs` | Documentation-only change |
+| `style` | Formatting or linting |
+| `perf` | Performance improvement |
+| `merge` | Merge commit |
 
 ### Examples
 
@@ -45,28 +46,16 @@ git commit -m "type: 설명"
 
 ## Commit Flow
 
-1. 변경사항 확인: `git status`, `git diff`
-2. 논리적 단위로 분류 (기능 / 버그 수정 / 리팩토링 등)
-3. 단위별로 파일 그룹화
-4. 각 그룹:
-   - `git add` 로 관련 파일만 스테이징
-   - 위 규칙에 따른 커밋 메시지 작성
-   - `git commit -m "..."` 실행
-5. `git log --oneline -n <count>` 로 확인
+1. Check changes: `git status`, `git diff`
+2. Split by logical unit (feature / bug fix / refactor, etc.)
+3. Group files per unit
+4. For each group:
+   - Stage related files with `git add`
+   - Write a commit message following the rules above
+   - Run `git commit -m "..."`
+5. Verify with `git log --oneline -n <count>`
 
 ## Important
 
-- 사용자가 명시적으로 요청할 때만 커밋 (`커밋`, `커밋해줘`, `commit` 등)
-- 명시적 요청 없이 자동 커밋 금지
-
-## Codex Notes
-
-The original Claude `allowed-tools` list is preserved as workflow guidance. It is not a Codex permission boundary.
-
-You're allowed to use these tools:
-
-- Bash(git add:*)
-- Bash(git status:*)
-- Bash(git commit:*)
-- Bash(git diff:*)
-- Bash(git log:*)
+- Only commit when the user explicitly requests it (`커밋`, `커밋해줘`, `commit`, etc.)
+- Do not auto-commit without explicit request
