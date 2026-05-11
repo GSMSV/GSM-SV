@@ -1,0 +1,49 @@
+name: Frontend CD
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'frontend/**'
+      - '.github/workflows/frontend-cd.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy Frontend
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Copy .env
+        run: cp "${{ secrets.DEPLOY_ENV_PATH }}" .env
+
+      - name: Build frontend image
+        run: docker compose build frontend
+
+      - name: Restart frontend container
+        run: docker compose up -d --no-deps frontend
+
+      - name: Verify frontend status
+        run: |
+          MAX=12
+          for i in $(seq 1 $MAX); do
+            echo "Waiting for frontend... ($i/$MAX)"
+            if docker compose ps frontend | grep -q "Up"; then
+              echo "frontend is Up."
+              docker compose ps frontend
+              exit 0
+            fi
+            if [ "$i" -eq "$MAX" ]; then
+              echo "Timeout: frontend did not become healthy within $((MAX * 5)) seconds."
+              docker compose logs frontend --tail=50
+              exit 1
+            fi
+            sleep 5
+          done
