@@ -1,0 +1,37 @@
+name: Backend CD
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'backend/**'
+      - '.github/workflows/backend-cd.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy Backend
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Copy .env
+        run: cp "${{ secrets.DEPLOY_ENV_PATH }}" .env
+
+      - name: Build backend image
+        run: docker compose build backend
+
+      - name: Restart backend container
+        run: docker compose up -d --no-deps backend
+
+      - name: Verify backend status
+        run: |
+          sleep 5
+          docker compose ps backend
+          docker compose ps backend | grep -q "Up" || { docker compose logs backend --tail=50; exit 1; }

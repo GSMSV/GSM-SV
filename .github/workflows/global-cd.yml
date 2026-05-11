@@ -1,0 +1,44 @@
+name: Global CD
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'backend/**'
+      - 'frontend/**'
+      - '.agents/**'
+      - '.claude/**'
+      - '.codex/**'
+      - '**.md'
+      - '.gitignore'
+      - '.github/workflows/backend-cd.yml'
+      - '.github/workflows/frontend-cd.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy All Services
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Copy .env
+        run: cp "${{ secrets.DEPLOY_ENV_PATH }}" .env
+
+      - name: Build all images
+        run: docker compose build
+
+      - name: Restart all containers
+        run: docker compose up -d
+
+      - name: Verify all services status
+        run: |
+          sleep 5
+          docker compose ps
+          docker compose ps | grep -q "Exit\|Restarting" && { docker compose logs --tail=50; exit 1; } || true
