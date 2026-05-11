@@ -1,6 +1,7 @@
 ---
 name: new-branch
 description: Create a new git branch following the GSMSV naming convention. Use when starting new work or creating a branch.
+allowed-tools: Bash(git checkout:*), Bash(git branch:*)
 ---
 
 Create and switch to a new branch following GSMSV naming conventions.

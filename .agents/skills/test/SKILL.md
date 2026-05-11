@@ -1,6 +1,7 @@
 ---
 name: test
 description: Run pytest tests and report results. Decide test scope by context and analyze failures in detail. Run the full suite only when necessary.
+allowed-tools: Bash(python:*)
 ---
 
 Run tests following these steps:
