@@ -88,32 +88,32 @@ git log --oneline -1
 **Applied comments:**
 ```bash
 gh api "repos/<owner>/<repo>/pulls/<pr_number>/comments/<comment_id>/replies" \
-  -f body="Applied in <short_hash>."
+  -f body="<short_hash> 에서 반영했습니다."
 ```
 
 **Comments registered as issues:**
 ```bash
 gh api "repos/<owner>/<repo>/pulls/<pr_number>/comments/<comment_id>/replies" \
-  -f body="Out of scope for this PR. Registered as <issue_url> for later."
+  -f body="이 PR 범위를 벗어나는 내용입니다. <issue_url> 에 이슈로 등록했습니다."
 ```
 
 **Ignored comments:**
 ```bash
 gh api "repos/<owner>/<repo>/pulls/<pr_number>/comments/<comment_id>/replies" \
-  -f body="Not applied because <reason>."
+  -f body="<reason> 이유로 반영하지 않았습니다."
 ```
 
 ## Step 7 — Report
 
 ```
-## Applied comments
-- [file] "comment" → applied in <hash>
+## 반영한 코멘트
+- [file] "comment" → <hash> 에서 반영했습니다.
 
-## Comments registered as issues
+## 이슈로 등록한 코멘트
 - [file] "comment" → <issue_url>
 
-## Ignored comments
-- [file] "comment" → reason: ...
+## 반영하지 않은 코멘트
+- [file] "comment" → 사유: ...
 ```
 
 ## Important

@@ -55,7 +55,7 @@ gh issue comment <existing_issue_number> --repo "$REPO" --body "$(cat <<'EOF'
 - **파일**: `<file path>`
 - **라인**: <line number>
 
-<Summary of newly found case>
+<새로 발견된 내용 요약 (한국어)>
 EOF
 )"
 ```
