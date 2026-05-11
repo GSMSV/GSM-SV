@@ -1,6 +1,7 @@
 ---
 name: security-checklist
 description: Validate security risks — hardcoded secrets, Path Traversal, SQL Injection, JWT validation, sensitive logging, and role-based access control. Run before merging auth/API changes.
+allowed-tools: Bash(grep:*)
 ---
 
 # Security Checklist (GSMSV)

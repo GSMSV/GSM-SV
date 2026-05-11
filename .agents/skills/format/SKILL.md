@@ -1,6 +1,7 @@
 ---
 name: format
 description: Run code formatting in GSMSV — ruff for Python, ESLint for TypeScript. Use after large edits or when formatting is needed.
+allowed-tools: Bash(ruff:*), Bash(npx:*)
 ---
 
 Run GSMSV project formatting:
