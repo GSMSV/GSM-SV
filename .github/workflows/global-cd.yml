@@ -39,6 +39,29 @@ jobs:
 
       - name: Verify all services status
         run: |
-          sleep 5
-          docker compose ps
-          docker compose ps | grep -q "Exit\|Restarting" && { docker compose logs --tail=50; exit 1; } || true
+          MAX=12
+          for i in $(seq 1 $MAX); do
+            echo "Waiting for all services... ($i/$MAX)"
+            PS_OUTPUT=$(docker compose ps)
+            echo "$PS_OUTPUT"
+
+            if echo "$PS_OUTPUT" | grep -qE "Exit|Restarting"; then
+              echo "Detected failed container. Dumping logs."
+              docker compose logs --tail=50
+              exit 1
+            fi
+
+            TOTAL=$(docker compose ps --services | wc -l | tr -d ' ')
+            UP_COUNT=$(echo "$PS_OUTPUT" | grep -c "Up" || true)
+            if [ "$UP_COUNT" -ge "$TOTAL" ]; then
+              echo "All $TOTAL services are Up."
+              exit 0
+            fi
+
+            if [ "$i" -eq "$MAX" ]; then
+              echo "Timeout: not all services became healthy within $((MAX * 5)) seconds."
+              docker compose logs --tail=50
+              exit 1
+            fi
+            sleep 5
+          done

@@ -32,6 +32,18 @@ jobs:
 
       - name: Verify frontend status
         run: |
-          sleep 5
-          docker compose ps frontend
-          docker compose ps frontend | grep -q "Up" || { docker compose logs frontend --tail=50; exit 1; }
+          MAX=12
+          for i in $(seq 1 $MAX); do
+            echo "Waiting for frontend... ($i/$MAX)"
+            if docker compose ps frontend | grep -q "Up"; then
+              echo "frontend is Up."
+              docker compose ps frontend
+              exit 0
+            fi
+            if [ "$i" -eq "$MAX" ]; then
+              echo "Timeout: frontend did not become healthy within $((MAX * 5)) seconds."
+              docker compose logs frontend --tail=50
+              exit 1
+            fi
+            sleep 5
+          done
