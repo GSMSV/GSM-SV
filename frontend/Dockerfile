@@ -9,13 +9,13 @@ RUN pnpm install --frozen-lockfile
 
 COPY . .
 
-ARG NEXT_PUBLIC_API_URL=http://backend:8000
-ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
+ARG API_URL=http://backend:8000
+ENV API_URL=$API_URL
 
 ARG NEXT_PUBLIC_DISCORD_URL
 ENV NEXT_PUBLIC_DISCORD_URL=$NEXT_PUBLIC_DISCORD_URL
 
-RUN pnpm build
+RUN pnpm build && pnpm prune --prod
 
 FROM node:20-alpine AS runner
 

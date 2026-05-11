@@ -24,7 +24,7 @@ services:
         condition: service_healthy
     env_file: .env
     environment:
-      DATABASE_URL: postgresql://gsmsv:${DB_PASSWORD}@db:5432/gsmsv
+      DATABASE_URL: postgresql://${POSTGRES_USER:-gsmsv}:${DB_PASSWORD}@db:5432/${POSTGRES_DB:-gsmsv}
     volumes:
       - uploads:/app/uploads
       - backups:/app/backups
@@ -36,12 +36,12 @@ services:
       context: ./frontend
       args:
         NEXT_PUBLIC_DISCORD_URL: ${NEXT_PUBLIC_DISCORD_URL}
-        NEXT_PUBLIC_API_URL: http://backend:8000
+        API_URL: http://backend:8000
     restart: always
     depends_on:
       - backend
     environment:
-      NEXT_PUBLIC_API_URL: http://backend:8000
+      API_URL: http://backend:8000
     ports:
       - "127.0.0.1:3000:3000"
 
