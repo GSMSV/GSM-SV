@@ -1,7 +1,6 @@
 ---
 name: new-api
 description: Implement a FastAPI endpoint end-to-end — model → service → router → frontend API function. Follow GSMSV project conventions.
-allowed-tools: Bash(python:*), Bash(npm:*)
 ---
 
 # New API Implementation Flow (GSMSV)

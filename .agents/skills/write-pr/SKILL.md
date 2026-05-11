@@ -1,7 +1,7 @@
 ---
 name: write-pr
 description: Analyze commits against develop, generate a PR title/body, and create a GitHub PR. Follow GSMSV project conventions.
-allowed-tools: Bash(git log:*), Bash(git diff:*), Bash(git branch:*), Bash(gh:*)
+allowed-tools: Bash(git log:*), Bash(git diff:*), Bash(git branch:*), Bash(gh:*), Bash(cat:*)
 ---
 
 ## Step 1 — Gather context
