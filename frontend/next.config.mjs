@@ -23,7 +23,7 @@ const nextConfig = {
   },
   // FastAPI 백엔드로 API 프록시 — CORS 문제 없이 동일 도메인 호출
   async rewrites() {
-    const backendUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8765";
+    const backendUrl = process.env.API_URL || "http://localhost:8765";
     return [
       {
         source: "/api/:path*",

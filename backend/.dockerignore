@@ -1,0 +1,13 @@
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+.env
+.env.*
+!.env.example
+tests/
+*.log
+uploads/
+backups/
+ruff.toml
+*.md

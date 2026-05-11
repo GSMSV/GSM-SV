@@ -32,13 +32,6 @@ backups/
 # 업로드 파일 (아바타 등 사용자 콘텐츠)
 uploads/
 
-# Docker
-backend/Dockerfile
-frontend/Dockerfile
-docker-compose.yml
-backend/.dockerignore
-frontend/.dockerignore
-backend/nginx/
 
 # Claude (개인 설정만 제외, 팀 공통 설정은 추적)
 .claude/settings.local.json
