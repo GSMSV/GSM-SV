@@ -59,7 +59,7 @@ jobs:
             | grep -vE '^(backend|frontend|serverless|\.agents|\.claude|\.codex)/' \
             | grep -v '\.md$' \
             | grep -v '^\.gitignore$' \
-            | grep -v '^\.github/workflows/cd\.yml$')
+            | grep -v '^\.github/workflows/')
           if [ -n "$GLOBAL" ]; then
             echo "global=true" >> "$GITHUB_OUTPUT"
           else
