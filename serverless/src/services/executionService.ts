@@ -1,5 +1,5 @@
 import { prisma } from "../db/prisma";
-import { executeFunction, FunctionRequest } from "../engine/runtime";
+import { executeFunction, compileTypeScript, FunctionRequest } from "../engine/runtime";
 import { Function as Fn } from "@prisma/client";
 
 export async function runFunction(
@@ -17,12 +17,19 @@ export async function runFunction(
     body: payload ? JSON.stringify(payload) : null,
   };
 
+  let compiledCode = func.compiledCode;
+  if (!compiledCode && func.runtime === "typescript") {
+    compiledCode = await compileTypeScript(func.code);
+    await prisma.function.update({ where: { id: func.id }, data: { compiledCode } });
+  }
+
   const result = await executeFunction(
     func.code,
     func.runtime as "javascript" | "typescript",
     request,
     envVars,
-    { timeout: func.timeout, memoryLimit: func.memoryLimit }
+    { timeout: func.timeout, memoryLimit: func.memoryLimit },
+    compiledCode
   );
 
   await prisma.executionLog.create({

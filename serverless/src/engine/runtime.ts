@@ -1,6 +1,15 @@
 import ivm from "isolated-vm";
 import * as esbuild from "esbuild";
 
+export async function compileTypeScript(code: string): Promise<string> {
+  const result = await esbuild.transform(code, {
+    loader: "ts",
+    target: "es2022",
+    format: "cjs",
+  });
+  return result.code;
+}
+
 export interface ExecutionResult {
   status: "success" | "error" | "timeout";
   body: string;
@@ -23,7 +32,8 @@ export async function executeFunction(
   runtime: "javascript" | "typescript",
   request: FunctionRequest,
   envVars: Record<string, string>,
-  options: { timeout: number; memoryLimit: number }
+  options: { timeout: number; memoryLimit: number },
+  compiledCode?: string | null
 ): Promise<ExecutionResult> {
   const startTime = Date.now();
   const logs: string[] = [];
@@ -32,12 +42,7 @@ export async function executeFunction(
   try {
     let execCode = code;
     if (runtime === "typescript") {
-      const result = await esbuild.transform(code, {
-        loader: "ts",
-        target: "es2022",
-        format: "esm",
-      });
-      execCode = result.code;
+      execCode = compiledCode ?? await compileTypeScript(code);
     }
 
     isolate = new ivm.Isolate({ memoryLimit: options.memoryLimit });
@@ -96,6 +101,8 @@ export async function executeFunction(
     await jail.set("__request", new ivm.ExternalCopy(request).copyInto());
 
     const wrappedCode = `
+      const exports = {};
+      const module = { exports };
       ${execCode}
 
       (async () => {
@@ -109,12 +116,8 @@ export async function executeFunction(
           text: () => req.body || '',
         };
 
-        let handlerFn;
-        if (typeof handler === 'function') {
-          handlerFn = handler;
-        } else if (typeof module !== 'undefined' && typeof module.exports === 'function') {
-          handlerFn = module.exports;
-        } else {
+        const handlerFn = exports.default || module.exports || (typeof handler === 'function' ? handler : null);
+        if (!handlerFn) {
           throw new Error('No handler function found. Define: export default async function handler(request) { ... }');
         }
 

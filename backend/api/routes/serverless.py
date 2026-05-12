@@ -5,7 +5,7 @@ from models.user import User
 from core.config import settings
 
 router = APIRouter()
-_TIMEOUT = httpx.Timeout(65.0)
+_http_client = httpx.AsyncClient(timeout=httpx.Timeout(65.0))
 
 
 async def _proxy(request: Request, path: str, current_user: User) -> Response:
@@ -20,14 +20,13 @@ async def _proxy(request: Request, path: str, current_user: User) -> Response:
     else:
         url = f"{settings.SERVERLESS_SERVICE_URL}/functions"
 
-    async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-        upstream = await client.request(
-            method=request.method,
-            url=url,
-            headers=headers,
-            content=body,
-            params=dict(request.query_params),
-        )
+    upstream = await _http_client.request(
+        method=request.method,
+        url=url,
+        headers=headers,
+        content=body,
+        params=dict(request.query_params),
+    )
     return Response(
         content=upstream.content,
         status_code=upstream.status_code,
