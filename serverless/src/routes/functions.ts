@@ -2,7 +2,7 @@ import { Router } from "express";
 import { prisma } from "../db/prisma";
 import { requireAuth } from "../middleware/auth";
 import { checkFunctionLimit, assertOwnership } from "../services/functionService";
-import { compileTypeScript } from "../engine/runtime";
+import { compileTypeScript, compileJavaScript } from "../engine/runtime";
 
 const router = Router();
 router.use(requireAuth);
@@ -22,6 +22,13 @@ router.post("/", async (req, res, next) => {
         compiledCode = await compileTypeScript(code);
       } catch (e: any) {
         return res.status(400).json({ error: `TypeScript 컴파일 오류: ${e.message}` });
+      }
+    } else {
+      // JS도 esbuild로 CJS 변환해서 저장 — 실행 시 재컴파일 없이 사용 + 문법 오류 조기 발견
+      try {
+        compiledCode = await compileJavaScript(code);
+      } catch (e: any) {
+        return res.status(400).json({ error: `JavaScript 컴파일 오류: ${e.message}` });
       }
     }
 
@@ -76,7 +83,12 @@ router.put("/:id", async (req, res, next) => {
           return res.status(400).json({ error: `TypeScript 컴파일 오류: ${e.message}` });
         }
       } else {
-        compiledCode = null;
+        // JS → CJS 변환
+        try {
+          compiledCode = await compileJavaScript(effectiveCode);
+        } catch (e: any) {
+          return res.status(400).json({ error: `JavaScript 컴파일 오류: ${e.message}` });
+        }
       }
     }
 

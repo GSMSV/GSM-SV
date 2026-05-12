@@ -1,3 +1,9 @@
+// 실행 흐름:
+// HTTP 요청 → gateway.ts (URL에서 ownerId/funcName 추출)
+//           → DB에서 Function 조회 + HTTP 트리거 유효성 검사
+//           → executionService.runFunction() (FunctionRequest 빌드)
+//           → executeFunction() (isolated-vm 샌드박스에서 사용자 handler 실행)
+//           → 결과를 HTTP 응답으로 반환
 import ivm from "isolated-vm";
 import * as esbuild from "esbuild";
 import { lookup } from "dns/promises";
@@ -27,9 +33,20 @@ function isPrivateIP(ip: string): boolean {
   );
 }
 
+// esbuild로 TS/JS → CJS 변환. isolated-vm의 eval()은 ESM을 지원하지 않으므로
+// `export default` 같은 ESM 구문을 CJS `exports.default =`로 바꿔야 한다.
 export async function compileTypeScript(code: string): Promise<string> {
   const result = await esbuild.transform(code, {
     loader: "ts",
+    target: "es2022",
+    format: "cjs",
+  });
+  return result.code;
+}
+
+export async function compileJavaScript(code: string): Promise<string> {
+  const result = await esbuild.transform(code, {
+    loader: "js",
     target: "es2022",
     format: "cjs",
   });
@@ -68,7 +85,11 @@ export async function executeFunction(
   try {
     let execCode = code;
     if (runtime === "typescript") {
+      // compiledCode가 있으면 재컴파일 없이 사용 (함수 저장 시 미리 컴파일됨)
       execCode = compiledCode ?? await compileTypeScript(code);
+    } else {
+      // JavaScript도 CJS로 변환 필요 — `export default` ESM 구문은 eval()에서 SyntaxError
+      execCode = compiledCode ?? await compileJavaScript(code);
     }
 
     isolate = new ivm.Isolate({ memoryLimit: options.memoryLimit });
@@ -151,27 +172,43 @@ export async function executeFunction(
 
     await jail.set("__request", new ivm.ExternalCopy(request).copyInto());
 
+    // CJS 래퍼: esbuild가 변환한 코드는 exports/module.exports를 사용한다.
+    // __request는 gateway(HTTP 트리거) 또는 execute 라우트(수동 실행)에서 전달된 요청 정보다.
+    // 사용자 코드가 `export default async function handler(request) { ... }` 형태이면
+    // esbuild가 `exports.default = handler`로 변환하므로 handlerFn = exports.default로 찾는다.
     const wrappedCode = `
       const exports = {};
       const module = { exports };
       ${execCode}
 
       (async () => {
+        // __request: { method, url, headers, body } — HTTP 요청 또는 수동 실행 페이로드
         const req = __request;
         const request = {
           method: req.method,
           url: req.url,
           headers: req.headers,
           body: req.body,
+          // json()/text()는 body를 파싱하는 편의 메서드
           json: () => JSON.parse(req.body || '{}'),
           text: () => req.body || '',
         };
 
-        const handlerFn = exports.default || module.exports || (typeof handler === 'function' ? handler : null);
+        // esbuild CJS 변환 시 module.exports = __toCommonJS(stdin_exports) 로 참조가 교체됨.
+        // 그 결과 exports 는 여전히 {} 이고, module.exports 는 { __esModule: true, default: handler } 가 됨.
+        // 따라서 module.exports.default → module.exports(함수 직접) → exports.default 순서로 탐색해야 한다.
+        const mod = module.exports;
+        const handlerFn =
+          (mod && typeof mod.default === 'function' ? mod.default : null) ||
+          (typeof mod === 'function' ? mod : null) ||
+          (typeof exports.default === 'function' ? exports.default : null) ||
+          (typeof handler === 'function' ? handler : null);
         if (!handlerFn) {
           throw new Error('No handler function found. Define: export default async function handler(request) { ... }');
         }
 
+        // handler를 호출하면 Response 인스턴스를 반환해야 한다.
+        // Response는 샌드박스에 주입된 커스텀 클래스: new Response(body, { status, headers })
         const response = await handlerFn(request);
         return JSON.stringify({
           body: response._body ?? String(response),
