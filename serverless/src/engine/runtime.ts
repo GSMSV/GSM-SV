@@ -1,5 +1,31 @@
 import ivm from "isolated-vm";
 import * as esbuild from "esbuild";
+import { lookup } from "dns/promises";
+import { isIPv4 } from "net";
+
+function isPrivateIP(ip: string): boolean {
+  if (isIPv4(ip)) {
+    const parts = ip.split(".").map(Number);
+    const [a, b] = parts;
+    return (
+      a === 127 ||
+      a === 10 ||
+      (a === 172 && b >= 16 && b <= 31) ||
+      (a === 192 && b === 168) ||
+      (a === 169 && b === 254) ||
+      (a === 100 && b >= 64 && b <= 127) ||
+      a === 0
+    );
+  }
+  const lower = ip.toLowerCase();
+  return (
+    lower === "::1" ||
+    lower.startsWith("fc") ||
+    lower.startsWith("fd") ||
+    lower.startsWith("fe80:") ||
+    lower.startsWith("::ffff:")
+  );
+}
 
 export async function compileTypeScript(code: string): Promise<string> {
   const result = await esbuild.transform(code, {
@@ -62,20 +88,31 @@ export async function executeFunction(
     await context.eval(`const env = __env;`);
 
     const fetchCallback = new ivm.Reference(async function (url: string, options?: string) {
-      let hostname: string;
+      let parsed: URL;
       try {
-        hostname = new URL(url).hostname;
+        parsed = new URL(url);
       } catch {
         throw new Error(`Invalid URL: ${url}`);
       }
+      const hostname = parsed.hostname;
       const host = hostname.startsWith("[") ? hostname.slice(1, -1) : hostname;
-      if (
-        /^169\.254\.\d+\.\d+$/.test(host) ||  // IPv4 link-local (cloud IMDS)
-        /^fe80:/i.test(host) ||                 // IPv6 link-local
-        /^fd00:ec2:/i.test(host)                // AWS IPv6 IMDS
-      ) {
+
+      let resolvedIP: string;
+      if (isIPv4(host) || host.includes(":")) {
+        resolvedIP = host;
+      } else {
+        try {
+          const result = await lookup(host);
+          resolvedIP = result.address;
+        } catch {
+          throw new Error(`Failed to resolve hostname: ${hostname}`);
+        }
+      }
+
+      if (isPrivateIP(resolvedIP)) {
         throw new Error(`Blocked URL: ${url}`);
       }
+
       const opts = options ? JSON.parse(options) : {};
       const res = await fetch(url, opts);
       const body = await res.text();
