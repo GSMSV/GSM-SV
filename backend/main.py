@@ -19,6 +19,7 @@ from api.routes import (
     notifications,
     oauth,
     faq,
+    serverless,
 )
 from api.routes.oauth import validate_oauth_store_mode
 from core.config import settings
@@ -511,6 +512,7 @@ app.include_router(
     tags=["notifications"],
 )
 app.include_router(faq.router, prefix=f"{settings.API_V1_STR}/faq", tags=["faq"])
+app.include_router(serverless.router, prefix=f"{settings.API_V1_STR}/serverless/functions", tags=["serverless"])
 
 # 업로드 파일 서빙
 os.makedirs("uploads/avatars", exist_ok=True)

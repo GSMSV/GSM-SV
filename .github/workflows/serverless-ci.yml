@@ -1,0 +1,31 @@
+name: Serverless CI
+
+on:
+  push:
+    branches: [develop, main]
+    paths:
+      - 'serverless/**'
+      - '.github/workflows/serverless-ci.yml'
+  pull_request:
+    branches: [develop, main]
+    paths:
+      - 'serverless/**'
+      - '.github/workflows/serverless-ci.yml'
+
+jobs:
+  build:
+    name: Serverless TypeScript Build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: serverless
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: serverless/package-lock.json
+      - run: npm ci
+      - run: npx prisma generate
+      - run: npx tsc --noEmit

@@ -52,6 +52,10 @@ class Settings(BaseSettings):
     OAUTH_STORE_MODE: str = "memory"               # memory | redis
     WEB_CONCURRENCY: int = 1
 
+    # 서버리스 서비스
+    SERVERLESS_SERVICE_URL: str = "http://serverless:3001"
+    MAX_FUNCTIONS_PER_USER: int = 5
+
     # 프로젝트 오너 전용 설정
     PROJECT_NODE_NAME: str = "gsmgpu3"            # 프로젝트 VM 전용 노드
 

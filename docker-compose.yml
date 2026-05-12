@@ -25,11 +25,26 @@ services:
     env_file: .env
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-gsmsv}:${DB_PASSWORD}@db:5432/${POSTGRES_DB:-gsmsv}
+      SERVERLESS_SERVICE_URL: http://serverless:3001
     volumes:
       - uploads:/app/uploads
       - backups:/app/backups
     ports:
       - "127.0.0.1:8000:8000"
+
+  serverless:
+    build:
+      context: ./serverless
+    restart: always
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-gsmsv}:${DB_PASSWORD}@db:5432/${POSTGRES_DB:-gsmsv}
+      NODE_ENV: production
+    ports:
+      - "127.0.0.1:3001:3001"
 
   frontend:
     build:

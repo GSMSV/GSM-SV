@@ -18,6 +18,10 @@ frontend/.next/
 frontend/node_modules/
 frontend/.env*.local
 
+# Serverless
+serverless/node_modules/
+serverless/dist/
+
 # IDE
 .vscode/
 .idea/
