@@ -14,6 +14,8 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
+    networks:
+      - internal-net
 
   backend:
     build:
@@ -31,6 +33,9 @@ services:
       - backups:/app/backups
     ports:
       - "127.0.0.1:8000:8000"
+    networks:
+      - internal-net
+      - serverless-net
 
   serverless:
     build:
@@ -45,6 +50,8 @@ services:
       NODE_ENV: production
     ports:
       - "127.0.0.1:3001:3001"
+    networks:
+      - serverless-net
 
   frontend:
     build:
@@ -59,8 +66,14 @@ services:
       API_URL: http://backend:8000
     ports:
       - "127.0.0.1:3000:3000"
+    networks:
+      - internal-net
 
 volumes:
   pgdata:
   uploads:
   backups:
+
+networks:
+  internal-net:
+  serverless-net:

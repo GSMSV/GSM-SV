@@ -62,6 +62,20 @@ export async function executeFunction(
     await context.eval(`const env = __env;`);
 
     const fetchCallback = new ivm.Reference(async function (url: string, options?: string) {
+      let hostname: string;
+      try {
+        hostname = new URL(url).hostname;
+      } catch {
+        throw new Error(`Invalid URL: ${url}`);
+      }
+      const host = hostname.startsWith("[") ? hostname.slice(1, -1) : hostname;
+      if (
+        /^169\.254\.\d+\.\d+$/.test(host) ||  // IPv4 link-local (cloud IMDS)
+        /^fe80:/i.test(host) ||                 // IPv6 link-local
+        /^fd00:ec2:/i.test(host)                // AWS IPv6 IMDS
+      ) {
+        throw new Error(`Blocked URL: ${url}`);
+      }
       const opts = options ? JSON.parse(options) : {};
       const res = await fetch(url, opts);
       const body = await res.text();
