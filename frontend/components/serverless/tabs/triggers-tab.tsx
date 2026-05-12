@@ -68,8 +68,11 @@ export default function TriggersTab({ funcId, ownerId, funcName }: TriggersTabPr
   }
 
   const handleDelete = async (id: string) => {
-    await deleteTrigger(funcId, id)
-    setTriggers((prev) => prev.filter((t) => t.id !== id))
+    try {
+      await deleteTrigger(funcId, id)
+    } finally {
+      setTriggers((prev) => prev.filter((t) => t.id !== id))
+    }
   }
 
   return (

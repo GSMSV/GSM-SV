@@ -40,8 +40,11 @@ export default function ServerlessFunctionPage() {
 
   const handleDelete = async () => {
     if (!func) return
-    await deleteFunction(func.id)
-    router.push("/serverless")
+    try {
+      await deleteFunction(func.id)
+    } finally {
+      router.push("/serverless")
+    }
   }
 
   if (loading || !func) {

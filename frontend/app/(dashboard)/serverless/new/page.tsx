@@ -18,14 +18,43 @@ import { createFunction } from "@/lib/serverless-api"
 
 const MonacoEditor = dynamic(() => import("@monaco-editor/react"), { ssr: false })
 
-const JS_TEMPLATE = `export default async function handler(request) {
+const JS_TEMPLATE = `// HTTP 트리거 설정 시: fn.gsmsv.site/{userId}/{funcName} 으로 요청이 오면 이 함수가 호출됩니다.
+// request 객체:
+//   request.method  - "GET" | "POST" 등 HTTP 메서드
+//   request.url     - 호출된 전체 URL
+//   request.headers - 요청 헤더 객체
+//   request.body    - 요청 바디 (문자열)
+//   request.json()  - 바디를 JSON으로 파싱
+//   request.text()  - 바디를 문자열로 반환
+// 반환: new Response(body, { status, headers })
+export default async function handler(request) {
   return new Response(JSON.stringify({ message: "Hello, World!" }), {
+    status: 200,
     headers: { "Content-Type": "application/json" },
   });
 }`
 
-const TS_TEMPLATE = `export default async function handler(request: Request): Promise<Response> {
+const TS_TEMPLATE = `// HTTP 트리거 설정 시: fn.gsmsv.site/{userId}/{funcName} 으로 요청이 오면 이 함수가 호출됩니다.
+// request 객체:
+//   request.method  - "GET" | "POST" 등 HTTP 메서드
+//   request.url     - 호출된 전체 URL
+//   request.headers - 요청 헤더 객체
+//   request.body    - 요청 바디 (문자열)
+//   request.json()  - 바디를 JSON으로 파싱
+//   request.text()  - 바디를 문자열로 반환
+// 반환: new Response(body, { status, headers })
+interface FunctionRequest {
+  method: string;
+  url: string;
+  headers: Record<string, string>;
+  body: string | null;
+  json(): unknown;
+  text(): string;
+}
+
+export default async function handler(request: FunctionRequest): Promise<Response> {
   return new Response(JSON.stringify({ message: "Hello, World!" }), {
+    status: 200,
     headers: { "Content-Type": "application/json" },
   });
 }`
