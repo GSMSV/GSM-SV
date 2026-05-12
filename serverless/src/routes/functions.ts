@@ -2,6 +2,7 @@ import { Router } from "express";
 import { prisma } from "../db/prisma";
 import { requireAuth } from "../middleware/auth";
 import { checkFunctionLimit, assertOwnership } from "../services/functionService";
+import { compileTypeScript } from "../engine/runtime";
 
 const router = Router();
 router.use(requireAuth);
@@ -14,8 +15,18 @@ router.post("/", async (req, res, next) => {
     if (memoryLimit > 256) return res.status(400).json({ error: "memoryLimit은 최대 256MB입니다." });
 
     await checkFunctionLimit(req.user!.userId);
+
+    let compiledCode: string | undefined;
+    if (runtime === "typescript") {
+      try {
+        compiledCode = await compileTypeScript(code);
+      } catch (e: any) {
+        return res.status(400).json({ error: `TypeScript 컴파일 오류: ${e.message}` });
+      }
+    }
+
     const func = await prisma.function.create({
-      data: { name, description, code, runtime, timeout, memoryLimit, envVars: JSON.stringify(envVars), ownerId: req.user!.userId },
+      data: { name, description, code, compiledCode, runtime, timeout, memoryLimit, envVars: JSON.stringify(envVars), ownerId: req.user!.userId },
     });
     res.status(201).json({ ...func, envVars: JSON.parse(func.envVars) });
   } catch (err: any) {
@@ -51,6 +62,24 @@ router.put("/:id", async (req, res, next) => {
     const { name, description, code, runtime, timeout, memoryLimit, envVars, status } = req.body;
     if (timeout && timeout > 60000) return res.status(400).json({ error: "timeout은 최대 60000ms입니다." });
     if (memoryLimit && memoryLimit > 256) return res.status(400).json({ error: "memoryLimit은 최대 256MB입니다." });
+
+    let compiledCode: string | null | undefined;
+    if (code !== undefined || runtime !== undefined) {
+      const existing = await prisma.function.findUnique({ where: { id: req.params.id }, select: { code: true, runtime: true } });
+      if (!existing) return res.status(404).json({ error: "Not found" });
+      const effectiveRuntime = runtime ?? existing.runtime;
+      const effectiveCode = code ?? existing.code;
+      if (effectiveRuntime === "typescript") {
+        try {
+          compiledCode = await compileTypeScript(effectiveCode);
+        } catch (e: any) {
+          return res.status(400).json({ error: `TypeScript 컴파일 오류: ${e.message}` });
+        }
+      } else {
+        compiledCode = null;
+      }
+    }
+
     const updated = await prisma.function.update({
       where: { id: req.params.id },
       data: {
@@ -62,6 +91,7 @@ router.put("/:id", async (req, res, next) => {
         ...(memoryLimit !== undefined && { memoryLimit }),
         ...(envVars !== undefined && { envVars: JSON.stringify(envVars) }),
         ...(status !== undefined && { status }),
+        ...(compiledCode !== undefined && { compiledCode }),
       },
     });
     res.json({ ...updated, envVars: JSON.parse(updated.envVars) });

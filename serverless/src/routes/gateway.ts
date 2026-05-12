@@ -4,9 +4,9 @@ import { runFunction } from "../services/executionService";
 
 const router = Router();
 
-router.all(/^\/(\d+)\/([^/]+)$/, async (req, res, next) => {
+router.all(/^\/(\d+)\/([^/?#]+)(\/.*)?$/, async (req, res, next) => {
   try {
-    const [, userIdStr, funcName] = req.path.match(/^\/(\d+)\/([^/]+)$/) || [];
+    const [, userIdStr, funcName] = req.path.match(/^\/(\d+)\/([^/?#]+)/) || [];
     const ownerId = parseInt(userIdStr);
 
     const func = await prisma.function.findUnique({
@@ -17,10 +17,8 @@ router.all(/^\/(\d+)\/([^/]+)$/, async (req, res, next) => {
     if (!func || func.status !== "active") return res.status(404).json({ error: "Function not found" });
     if (func.triggers.length === 0) return res.status(404).json({ error: "No HTTP trigger enabled" });
 
-    const trigger = func.triggers[0];
-    if (trigger.httpMethod !== "ANY" && req.method !== trigger.httpMethod) {
-      return res.status(405).json({ error: "Method Not Allowed" });
-    }
+    const trigger = func.triggers.find(t => t.httpMethod === "ANY" || t.httpMethod === req.method);
+    if (!trigger) return res.status(405).json({ error: "Method Not Allowed" });
 
     const result = await runFunction(func, req.body || null, "http", {
       method: req.method,

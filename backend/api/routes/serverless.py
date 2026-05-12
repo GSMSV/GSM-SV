@@ -1,8 +1,11 @@
+import logging
 import httpx
-from fastapi import APIRouter, Depends, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from api.dependencies import get_current_user
 from models.user import User
 from core.config import settings
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 _http_client = httpx.AsyncClient(timeout=httpx.Timeout(65.0))
@@ -20,13 +23,17 @@ async def _proxy(request: Request, path: str, current_user: User) -> Response:
     else:
         url = f"{settings.SERVERLESS_SERVICE_URL}/functions"
 
-    upstream = await _http_client.request(
-        method=request.method,
-        url=url,
-        headers=headers,
-        content=body,
-        params=dict(request.query_params),
-    )
+    try:
+        upstream = await _http_client.request(
+            method=request.method,
+            url=url,
+            headers=headers,
+            content=body,
+            params=dict(request.query_params),
+        )
+    except (httpx.ConnectError, httpx.TimeoutException):
+        logger.exception("serverless upstream unreachable: %s", url)
+        raise HTTPException(status_code=502, detail="Serverless service unavailable")
     return Response(
         content=upstream.content,
         status_code=upstream.status_code,

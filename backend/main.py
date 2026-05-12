@@ -461,6 +461,7 @@ async def lifespan(app: FastAPI):
     iptables_task.cancel()
     snapshot_task.cancel()
     oauth_cleanup_task.cancel()
+    await serverless._http_client.aclose()
 
 
 app = FastAPI(
