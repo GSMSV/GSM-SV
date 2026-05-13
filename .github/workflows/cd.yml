@@ -3,6 +3,14 @@ name: CD
 on:
   push:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      service:
+        description: '배포할 서비스'
+        required: true
+        default: 'all'
+        type: choice
+        options: [backend, frontend, serverless, all]
 
 permissions:
   contents: read
@@ -28,6 +36,32 @@ jobs:
       - name: Analyze changed files
         id: changes
         run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            SERVICE="${{ inputs.service }}"
+            if [ "$SERVICE" = "backend" ]; then
+              echo "backend=true" >> "$GITHUB_OUTPUT"
+              echo "frontend=false" >> "$GITHUB_OUTPUT"
+              echo "serverless=false" >> "$GITHUB_OUTPUT"
+              echo "global=false" >> "$GITHUB_OUTPUT"
+            elif [ "$SERVICE" = "frontend" ]; then
+              echo "backend=false" >> "$GITHUB_OUTPUT"
+              echo "frontend=true" >> "$GITHUB_OUTPUT"
+              echo "serverless=false" >> "$GITHUB_OUTPUT"
+              echo "global=false" >> "$GITHUB_OUTPUT"
+            elif [ "$SERVICE" = "serverless" ]; then
+              echo "backend=false" >> "$GITHUB_OUTPUT"
+              echo "frontend=false" >> "$GITHUB_OUTPUT"
+              echo "serverless=true" >> "$GITHUB_OUTPUT"
+              echo "global=false" >> "$GITHUB_OUTPUT"
+            else
+              echo "backend=false" >> "$GITHUB_OUTPUT"
+              echo "frontend=false" >> "$GITHUB_OUTPUT"
+              echo "serverless=false" >> "$GITHUB_OUTPUT"
+              echo "global=true" >> "$GITHUB_OUTPUT"
+            fi
+            exit 0
+          fi
+
           CHANGED=$(git diff --name-only HEAD~1 HEAD)
           echo "Changed files:"
           echo "$CHANGED"
