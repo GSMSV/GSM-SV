@@ -4,21 +4,25 @@ import { useEffect, useState } from "react"
 import Link from "next/link"
 import { Plus, Zap } from "lucide-react"
 import { Button } from "@/components/ui/button"
-import { getFunctions, type ServerlessFunction } from "@/lib/serverless-api"
+import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip"
+import { getFunctions, getQuota, type ServerlessFunction, type FunctionQuota } from "@/lib/serverless-api"
 import FunctionList from "@/components/serverless/function-list"
-
-const MAX_FUNCTIONS = 5
 
 export default function ServerlessPage() {
   const [functions, setFunctions] = useState<ServerlessFunction[]>([])
+  const [quota, setQuota] = useState<FunctionQuota | null>(null)
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    getFunctions()
-      .then(setFunctions)
-      .catch(console.error)
+    Promise.allSettled([getFunctions(), getQuota()])
+      .then(([funcsResult, quotaResult]) => {
+        if (funcsResult.status === "fulfilled") setFunctions(funcsResult.value)
+        if (quotaResult.status === "fulfilled") setQuota(quotaResult.value)
+      })
       .finally(() => setLoading(false))
   }, [])
+
+  const isAtLimit = !quota || functions.length >= quota.max
 
   return (
     <div className="space-y-6">
@@ -29,13 +33,50 @@ export default function ServerlessPage() {
             코드를 배포하고 HTTP 트리거 또는 Cron으로 실행하세요
           </p>
         </div>
-        <Button asChild disabled={functions.length >= MAX_FUNCTIONS}>
-          <Link href="/serverless/new">
-            <Plus className="w-4 h-4 mr-2" />
-            새 함수
-          </Link>
-        </Button>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <span tabIndex={isAtLimit ? 0 : -1}>
+              <Button asChild={!isAtLimit} disabled={isAtLimit}>
+                {isAtLimit ? (
+                  <span className="flex items-center">
+                    <Plus className="w-4 h-4 mr-2" />
+                    새 함수
+                  </span>
+                ) : (
+                  <Link href="/serverless/new">
+                    <Plus className="w-4 h-4 mr-2" />
+                    새 함수
+                  </Link>
+                )}
+              </Button>
+            </span>
+          </TooltipTrigger>
+          {isAtLimit && quota && (
+            <TooltipContent>
+              함수 한도({quota.max}개)에 도달했습니다
+            </TooltipContent>
+          )}
+        </Tooltip>
       </div>
+
+      {quota && (
+        <div className="rounded-lg border bg-card p-4">
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-sm font-medium">함수 사용량</span>
+            <span className="text-sm text-muted-foreground">
+              {functions.length} / {quota.max} 개
+            </span>
+          </div>
+          <div className="w-full bg-muted rounded-full h-2">
+            <div
+              className={`h-2 rounded-full transition-all ${
+                functions.length >= quota.max ? "bg-destructive" : "bg-primary"
+              }`}
+              style={{ width: `${quota.max > 0 ? Math.min((functions.length / quota.max) * 100, 100) : 100}%` }}
+            />
+          </div>
+        </div>
+      )}
 
       {loading ? (
         <div className="text-muted-foreground text-sm">로딩 중...</div>

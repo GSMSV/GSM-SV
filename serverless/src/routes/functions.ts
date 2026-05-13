@@ -3,6 +3,7 @@ import { prisma } from "../db/prisma";
 import { requireAuth } from "../middleware/auth";
 import { checkFunctionLimit, assertOwnership } from "../services/functionService";
 import { compileTypeScript, compileJavaScript } from "../engine/runtime";
+import { config } from "../config";
 
 const router = Router();
 router.use(requireAuth);
@@ -48,6 +49,13 @@ router.get("/", async (req, res, next) => {
     const where = req.user!.role === "admin" ? {} : { ownerId: req.user!.userId };
     const functions = await prisma.function.findMany({ where, orderBy: { createdAt: "desc" } });
     res.json(functions.map(f => ({ ...f, envVars: JSON.parse(f.envVars) })));
+  } catch (err) { next(err); }
+});
+
+router.get("/quota", async (req, res, next) => {
+  try {
+    const current = await prisma.function.count({ where: { ownerId: req.user!.userId } });
+    res.json({ current, max: config.maxFunctionsPerUser });
   } catch (err) { next(err); }
 });
 
