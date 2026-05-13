@@ -156,6 +156,7 @@ export async function executeFunction(
         reqHeaders["Content-Length"] = String(Buffer.byteLength(body));
       }
 
+      // 리다이렉트(3xx)는 의도적으로 차단: 새 URL에 대한 SSRF 재검증 없이 따라가면 우회 가능
       const response = await new Promise<{
         status: number;
         statusText: string;
@@ -171,6 +172,7 @@ export async function executeFunction(
             path: parsed.pathname + parsed.search,
             headers: reqHeaders,
             servername: isHttps ? host : undefined,
+            timeout: 10000,
           },
           (res) => {
             const chunks: Buffer[] = [];
@@ -181,16 +183,21 @@ export async function executeFunction(
                 if (v === undefined) continue;
                 respHeaders[k] = Array.isArray(v) ? v.join(", ") : String(v);
               }
+              const contentType = res.headers["content-type"] ?? "";
+              const charsetMatch = contentType.match(/charset=([^\s;]+)/i);
+              const encoding = (charsetMatch?.[1]?.toLowerCase() ?? "utf-8") as BufferEncoding;
+              const safeEncoding: BufferEncoding = Buffer.isEncoding(encoding) ? encoding : "utf8";
               resolve({
                 status: res.statusCode ?? 0,
                 statusText: res.statusMessage ?? "",
                 headers: respHeaders,
-                body: Buffer.concat(chunks).toString("utf8"),
+                body: Buffer.concat(chunks).toString(safeEncoding),
               });
             });
           }
         );
         req.on("error", reject);
+        req.on("timeout", () => req.destroy(new Error("Request timed out")));
         if (body !== undefined && body !== null) req.write(body);
         req.end();
       });
