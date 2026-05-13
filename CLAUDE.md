@@ -1,13 +1,14 @@
 # GSMSV — Claude 프로젝트 지침서
 
-Proxmox VE 기반 VM 신청·관리 플랫폼. Backend: FastAPI/SQLAlchemy/PostgreSQL, Frontend: Next.js 16 App Router/TypeScript/shadcn-ui, Auth: JWT (access 30분 / refresh 7일), 역할: USER / PROJECT_OWNER / ADMIN
+Proxmox VE 기반 VM 신청·관리 플랫폼 + Serverless 함수 실행 서비스. Backend: FastAPI/SQLAlchemy/PostgreSQL, Frontend: Next.js 16 App Router/TypeScript/shadcn-ui, Serverless: Express/Prisma/PostgreSQL/isolated-vm, Auth: JWT (access 30분 / refresh 7일), 역할: USER / PROJECT_OWNER / ADMIN
 
 ---
 
 ## 📁 디렉터리 구조
 
 `backend/api/routes/` 라우터, `backend/services/` 비즈니스 로직, `backend/models/` SQLAlchemy 모델, `backend/schemas/` Pydantic 스키마, `backend/core/` 설정·DB·보안, `backend/main.py` 앱 진입점·백그라운드 태스크  
-`frontend/app/` Next.js 페이지, `frontend/components/` React 컴포넌트, `frontend/lib/` api.ts·types.ts·유틸
+`frontend/app/` Next.js 페이지, `frontend/components/` React 컴포넌트, `frontend/lib/` api.ts·types.ts·유틸  
+`serverless/src/` Express 앱 진입점·라우터·서비스·엔진, `serverless/prisma/` Prisma 스키마·마이그레이션
 
 ---
 
@@ -54,6 +55,20 @@ Proxmox VE 기반 VM 신청·관리 플랫폼. Backend: FastAPI/SQLAlchemy/Postg
 **FAQ**
 - `backend/api/routes/faq.py`, `backend/models/faq_question.py`
 - FE: `frontend/app/(dashboard)/docs/`, `frontend/components/docs/docs-layout.tsx`
+
+**Serverless 함수 실행**
+- `backend/api/routes/serverless.py` — Serverless 서비스 프록시 엔드포인트 (백엔드 → serverless 서비스 중계)
+- `serverless/src/routes/functions.ts` — 함수 CRUD, `serverless/src/routes/execute.ts` — 함수 직접 실행
+- `serverless/src/routes/gateway.ts` — HTTP 트리거 게이트웨이, `serverless/src/routes/triggers.ts` — 트리거 CRUD
+- `serverless/src/routes/logs.ts` — 실행 로그 조회
+- `serverless/src/engine/runtime.ts` — `isolated-vm` 샌드박스 실행 엔진 (CPU/메모리 제한·타임아웃)
+- `serverless/src/services/executionService.ts` — 실행 오케스트레이션, `serverless/src/services/schedulerService.ts` — 크론 스케줄러
+- `serverless/src/services/triggerService.ts` — HTTP/크론 트리거 관리, `serverless/src/services/functionService.ts` — 함수 CRUD 로직
+- `serverless/src/middleware/auth.ts` — Serverless 서비스 자체 JWT 인증
+- `serverless/prisma/schema.prisma` — Function·Trigger·ExecutionLog 모델
+- FE: `frontend/app/(dashboard)/serverless/` — 함수 목록·신규 생성 페이지
+- FE: `frontend/components/serverless/` — 함수 목록 컴포넌트, `tabs/` (code·env·logs·test·triggers 탭)
+- FE API: `frontend/lib/serverless-api.ts` — Serverless 전용 API 호출 함수
 
 **공통**
 - `frontend/lib/types.ts` — 전체 프론트 타입, `frontend/lib/api.ts` — 백엔드 호출 함수
@@ -139,3 +154,4 @@ Proxmox VE 기반 VM 신청·관리 플랫폼. Backend: FastAPI/SQLAlchemy/Postg
 - Proxmox 노드: `.env`의 `NODE_1/2/3_*`, 프로젝트 오너 전용: `settings.PROJECT_NODE_NAME` (기본 `gsmgpu3`)
 - VM 티어: BASIC / STANDARD / ADVANCED / PROJECT_CUSTOM
 - 업로드: `backend/uploads/avatars/` (Docker volume `gsmsv_uploads`)
+- Serverless 서비스: `docker compose up serverless` 로 독립 컨테이너 실행, 백엔드가 `SERVERLESS_SERVICE_URL` 환경변수로 프록시

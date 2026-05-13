@@ -3,6 +3,14 @@ name: CD
 on:
   push:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      service:
+        description: '배포할 서비스'
+        required: true
+        default: 'all'
+        type: choice
+        options: [backend, frontend, serverless, all]
 
 permissions:
   contents: read
@@ -18,6 +26,7 @@ jobs:
     outputs:
       backend: ${{ steps.changes.outputs.backend }}
       frontend: ${{ steps.changes.outputs.frontend }}
+      serverless: ${{ steps.changes.outputs.serverless }}
       global: ${{ steps.changes.outputs.global }}
     steps:
       - uses: actions/checkout@v4
@@ -27,6 +36,32 @@ jobs:
       - name: Analyze changed files
         id: changes
         run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            SERVICE="${{ inputs.service }}"
+            if [ "$SERVICE" = "backend" ]; then
+              echo "backend=true" >> "$GITHUB_OUTPUT"
+              echo "frontend=false" >> "$GITHUB_OUTPUT"
+              echo "serverless=false" >> "$GITHUB_OUTPUT"
+              echo "global=false" >> "$GITHUB_OUTPUT"
+            elif [ "$SERVICE" = "frontend" ]; then
+              echo "backend=false" >> "$GITHUB_OUTPUT"
+              echo "frontend=true" >> "$GITHUB_OUTPUT"
+              echo "serverless=false" >> "$GITHUB_OUTPUT"
+              echo "global=false" >> "$GITHUB_OUTPUT"
+            elif [ "$SERVICE" = "serverless" ]; then
+              echo "backend=false" >> "$GITHUB_OUTPUT"
+              echo "frontend=false" >> "$GITHUB_OUTPUT"
+              echo "serverless=true" >> "$GITHUB_OUTPUT"
+              echo "global=false" >> "$GITHUB_OUTPUT"
+            else
+              echo "backend=false" >> "$GITHUB_OUTPUT"
+              echo "frontend=false" >> "$GITHUB_OUTPUT"
+              echo "serverless=false" >> "$GITHUB_OUTPUT"
+              echo "global=true" >> "$GITHUB_OUTPUT"
+            fi
+            exit 0
+          fi
+
           CHANGED=$(git diff --name-only HEAD~1 HEAD)
           echo "Changed files:"
           echo "$CHANGED"
@@ -45,13 +80,20 @@ jobs:
             echo "frontend=false" >> "$GITHUB_OUTPUT"
           fi
 
+          # serverless/** 또는 cd 워크플로우 자체가 변경됐는지 확인
+          if echo "$CHANGED" | grep -qE '^serverless/|^\.github/workflows/cd\.yml$'; then
+            echo "serverless=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "serverless=false" >> "$GITHUB_OUTPUT"
+          fi
+
           # global 트리거 대상 파일이 변경됐는지 확인
-          # (backend/frontend 외의 실질적인 파일 변경 = docker-compose, nginx, .env 등)
+          # (backend/frontend/serverless 외의 실질적인 파일 변경 = docker-compose, nginx, .env 등)
           GLOBAL=$(echo "$CHANGED" \
-            | grep -vE '^(backend|frontend|\.agents|\.claude|\.codex)/' \
+            | grep -vE '^(backend|frontend|serverless|\.agents|\.claude|\.codex)/' \
             | grep -v '\.md$' \
             | grep -v '^\.gitignore$' \
-            | grep -v '^\.github/workflows/cd\.yml$')
+            | grep -v '^\.github/workflows/')
           if [ -n "$GLOBAL" ]; then
             echo "global=true" >> "$GITHUB_OUTPUT"
           else
@@ -125,6 +167,42 @@ jobs:
             if [ "$i" -eq "$MAX" ]; then
               echo "Timeout: frontend did not become healthy within $((MAX * 5)) seconds."
               docker compose logs frontend --tail=50
+              exit 1
+            fi
+            sleep 5
+          done
+
+  deploy-serverless:
+    name: Deploy Serverless
+    needs: detect
+    # global 파일이 함께 변경됐으면 deploy-all이 담당하므로 skip
+    if: needs.detect.outputs.serverless == 'true' && needs.detect.outputs.global == 'false'
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Copy .env
+        run: cp "${{ secrets.DEPLOY_ENV_PATH }}" .env
+
+      - name: Build serverless image
+        run: docker compose build serverless
+
+      - name: Restart serverless container
+        run: docker compose up -d --no-deps serverless
+
+      - name: Verify serverless status
+        run: |
+          MAX=12
+          for i in $(seq 1 $MAX); do
+            echo "Waiting for serverless... ($i/$MAX)"
+            if docker compose ps serverless | grep -q "Up"; then
+              echo "serverless is Up."
+              docker compose ps serverless
+              exit 0
+            fi
+            if [ "$i" -eq "$MAX" ]; then
+              echo "Timeout: serverless did not become healthy within $((MAX * 5)) seconds."
+              docker compose logs serverless --tail=50
               exit 1
             fi
             sleep 5

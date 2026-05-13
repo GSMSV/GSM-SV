@@ -92,6 +92,7 @@ export async function api<T = unknown>(
     throw new ApiError(res.status, error.detail || `HTTP ${res.status}`);
   }
 
+  if (res.status === 204) return undefined as T;
   return res.json() as Promise<T>;
 }
 

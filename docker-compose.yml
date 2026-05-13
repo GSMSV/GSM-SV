@@ -14,6 +14,9 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
+    networks:
+      - internal-net
+      - serverless-net
 
   backend:
     build:
@@ -25,11 +28,31 @@ services:
     env_file: .env
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-gsmsv}:${DB_PASSWORD}@db:5432/${POSTGRES_DB:-gsmsv}
+      SERVERLESS_SERVICE_URL: http://serverless:3001
     volumes:
       - uploads:/app/uploads
       - backups:/app/backups
     ports:
       - "127.0.0.1:8000:8000"
+    networks:
+      - internal-net
+      - serverless-net
+
+  serverless:
+    build:
+      context: ./serverless
+    restart: always
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-gsmsv}:${DB_PASSWORD}@db:5432/${POSTGRES_DB:-gsmsv}
+      NODE_ENV: production
+    ports:
+      - "127.0.0.1:3001:3001"
+    networks:
+      - serverless-net
 
   frontend:
     build:
@@ -44,8 +67,14 @@ services:
       API_URL: http://backend:8000
     ports:
       - "127.0.0.1:3000:3000"
+    networks:
+      - internal-net
 
 volumes:
   pgdata:
   uploads:
   backups:
+
+networks:
+  internal-net:
+  serverless-net:
