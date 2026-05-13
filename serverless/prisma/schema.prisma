@@ -1,0 +1,63 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Function {
+  id           String   @id @default(cuid())
+  name         String
+  description  String?
+  code         String
+  compiledCode String?
+  runtime      String   @default("javascript")
+  timeout      Int      @default(30000)
+  memoryLimit  Int      @default(128)
+  envVars      String   @default("{}")
+  status       String   @default("active")
+  ownerId      Int
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  triggers     Trigger[]
+  logs         ExecutionLog[]
+
+  @@unique([ownerId, name])
+  @@map("sv_functions")
+}
+
+model Trigger {
+  id         String   @id @default(cuid())
+  functionId String
+  type       String
+  httpMethod String?  @default("ANY")
+  cronExpr   String?
+  enabled    Boolean  @default(true)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  function   Function @relation(fields: [functionId], references: [id], onDelete: Cascade)
+
+  @@map("sv_triggers")
+}
+
+model ExecutionLog {
+  id          String   @id @default(cuid())
+  functionId  String
+  trigger     String
+  status      String
+  duration    Int
+  logs        String   @default("[]")
+  error       String?
+  requestBody String?
+  response    String?
+  createdAt   DateTime @default(now())
+
+  function    Function @relation(fields: [functionId], references: [id], onDelete: Cascade)
+
+  @@index([functionId, createdAt])
+  @@map("sv_execution_logs")
+}

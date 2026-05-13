@@ -92,6 +92,7 @@ export async function api<T = unknown>(
     throw new ApiError(res.status, error.detail || `HTTP ${res.status}`);
   }
 
+  if (res.status === 204) return undefined as T;
   return res.json() as Promise<T>;
 }
 
@@ -215,18 +216,20 @@ export async function resendCode(email: string): Promise<{ message: string }> {
 
 // ── 비밀번호 재설정 ─────────────────────────────────────────
 
-export async function requestPasswordReset(email: string): Promise<{ message: string; email: string }> {
+export type ResetRole = "user" | "project_owner";
+
+export async function requestPasswordReset(email: string, login_role: ResetRole = "user"): Promise<{ message: string; email: string }> {
   return api<{ message: string; email: string }>("/auth/password-reset/request", {
     method: "POST",
-    body: { email },
+    body: { email, login_role },
     skipAuth: true,
   });
 }
 
-export async function confirmPasswordReset(email: string, code: string, new_password: string): Promise<{ message: string }> {
+export async function confirmPasswordReset(email: string, code: string, new_password: string, login_role: ResetRole = "user"): Promise<{ message: string }> {
   return api<{ message: string }>("/auth/password-reset/confirm", {
     method: "POST",
-    body: { email, code, new_password },
+    body: { email, code, new_password, login_role },
     skipAuth: true,
   });
 }

@@ -59,6 +59,7 @@ export default function GettingStartedPage() {
         <li><strong>방화벽 관리</strong> — Proxmox VM 레벨의 방화벽 규칙을 추가하거나 삭제할 수 있습니다.</li>
         <li><strong>리소스 모니터링</strong> — CPU, RAM 실시간 그래프(1h / 6h / 24h)로 VM 상태를 확인할 수 있습니다.</li>
         <li><strong>알림</strong> — VM 생성/삭제 및 리소스 경고(90% 초과)를 알림으로 받을 수 있습니다.</li>
+        <li><strong>Serverless 함수</strong> — JavaScript / TypeScript 코드를 서버 없이 실행하고 HTTP 또는 크론으로 트리거할 수 있습니다.</li>
       </ul>
 
       <h2>계정 유형</h2>

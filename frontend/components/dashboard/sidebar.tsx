@@ -42,6 +42,7 @@ type NavItemData = {
 const mainNavItems: NavItemData[] = [
   { title: "인스턴스", href: "/instances", icon: Server },
   { title: "VM 생성", href: "/deploy", icon: Rocket },
+  { title: "서버리스", href: "/serverless", icon: Zap },
 ]
 
 // 문서 카테고리 (하위 카테고리 지원)
