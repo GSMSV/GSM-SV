@@ -24,6 +24,8 @@ router.post("/", async (req: Request<{ id: string }>, res, next) => {
     const { type, httpMethod, cronExpr, enabled } = req.body;
     if (!type || !["http", "cron"].includes(type)) return res.status(400).json({ error: "type은 'http' 또는 'cron'이어야 합니다." });
     if (type === "cron" && !cronExpr) return res.status(400).json({ error: "cron 트리거에는 cronExpr이 필요합니다." });
+    const validMethods = ["ANY", "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
+    if (type === "http" && httpMethod && !validMethods.includes(httpMethod)) return res.status(400).json({ error: "유효하지 않은 HTTP 메서드입니다." });
     const trigger = await createTrigger(req.params.id, { type, httpMethod, cronExpr, enabled });
     res.status(201).json(trigger);
   } catch (err: any) {
