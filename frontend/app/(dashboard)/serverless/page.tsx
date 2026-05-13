@@ -14,12 +14,11 @@ export default function ServerlessPage() {
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    Promise.all([getFunctions(), getQuota()])
-      .then(([funcs, q]) => {
-        setFunctions(funcs)
-        setQuota(q)
+    Promise.allSettled([getFunctions(), getQuota()])
+      .then(([funcsResult, quotaResult]) => {
+        if (funcsResult.status === "fulfilled") setFunctions(funcsResult.value)
+        if (quotaResult.status === "fulfilled") setQuota(quotaResult.value)
       })
-      .catch(console.error)
       .finally(() => setLoading(false))
   }, [])
 
@@ -65,15 +64,15 @@ export default function ServerlessPage() {
           <div className="flex items-center justify-between mb-2">
             <span className="text-sm font-medium">함수 사용량</span>
             <span className="text-sm text-muted-foreground">
-              {quota.current} / {quota.max} 개
+              {functions.length} / {quota.max} 개
             </span>
           </div>
           <div className="w-full bg-muted rounded-full h-2">
             <div
               className={`h-2 rounded-full transition-all ${
-                quota.current >= quota.max ? "bg-destructive" : "bg-primary"
+                functions.length >= quota.max ? "bg-destructive" : "bg-primary"
               }`}
-              style={{ width: `${Math.min((quota.current / quota.max) * 100, 100)}%` }}
+              style={{ width: `${quota.max > 0 ? Math.min((functions.length / quota.max) * 100, 100) : 100}%` }}
             />
           </div>
         </div>
