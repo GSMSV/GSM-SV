@@ -8,6 +8,8 @@ import ivm from "isolated-vm";
 import * as esbuild from "esbuild";
 import { lookup } from "dns/promises";
 import { isIPv4 } from "net";
+import * as http from "http";
+import * as https from "https";
 
 function isPrivateIP(ip: string): boolean {
   if (isIPv4(ip)) {
@@ -115,6 +117,9 @@ export async function executeFunction(
       } catch {
         throw new Error(`Invalid URL: ${url}`);
       }
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+        throw new Error(`Blocked URL: ${url}`);
+      }
       const hostname = parsed.hostname;
       const host = hostname.startsWith("[") ? hostname.slice(1, -1) : hostname;
 
@@ -134,15 +139,63 @@ export async function executeFunction(
         throw new Error(`Blocked URL: ${url}`);
       }
 
-      const opts = options ? JSON.parse(options) : {};
-      const res = await fetch(url, opts);
-      const body = await res.text();
-      return JSON.stringify({
-        status: res.status,
-        statusText: res.statusText,
-        headers: Object.fromEntries(res.headers.entries()),
-        body,
+      // DNS Rebinding(TOCTOU) 방지: 검증한 IP로 직접 소켓 연결을 맺고,
+      // Host 헤더와 TLS SNI(servername)는 원래 호스트네임을 사용한다.
+      // fetch(url)를 그대로 호출하면 내부적으로 DNS가 재조회되어 검증을 우회할 수 있다.
+      const opts: { method?: string; headers?: Record<string, string>; body?: string } =
+        options ? JSON.parse(options) : {};
+      const isHttps = parsed.protocol === "https:";
+      const port = parsed.port ? Number(parsed.port) : (isHttps ? 443 : 80);
+      const reqHeaders: Record<string, string> = {};
+      for (const [k, v] of Object.entries(opts.headers ?? {})) {
+        if (k.toLowerCase() !== "host") reqHeaders[k] = v;
+      }
+      reqHeaders["Host"] = parsed.host;
+      const body = opts.body;
+      if (body !== undefined && body !== null && reqHeaders["Content-Length"] === undefined) {
+        reqHeaders["Content-Length"] = String(Buffer.byteLength(body));
+      }
+
+      const response = await new Promise<{
+        status: number;
+        statusText: string;
+        headers: Record<string, string>;
+        body: string;
+      }>((resolve, reject) => {
+        const mod = isHttps ? https : http;
+        const req = mod.request(
+          {
+            host: resolvedIP,
+            port,
+            method: opts.method ?? "GET",
+            path: parsed.pathname + parsed.search,
+            headers: reqHeaders,
+            servername: isHttps ? host : undefined,
+          },
+          (res) => {
+            const chunks: Buffer[] = [];
+            res.on("data", (chunk: Buffer) => chunks.push(chunk));
+            res.on("end", () => {
+              const respHeaders: Record<string, string> = {};
+              for (const [k, v] of Object.entries(res.headers)) {
+                if (v === undefined) continue;
+                respHeaders[k] = Array.isArray(v) ? v.join(", ") : String(v);
+              }
+              resolve({
+                status: res.statusCode ?? 0,
+                statusText: res.statusMessage ?? "",
+                headers: respHeaders,
+                body: Buffer.concat(chunks).toString("utf8"),
+              });
+            });
+          }
+        );
+        req.on("error", reject);
+        if (body !== undefined && body !== null) req.write(body);
+        req.end();
       });
+
+      return JSON.stringify(response);
     });
     await jail.set("__fetchRef", fetchCallback);
     await context.eval(`
