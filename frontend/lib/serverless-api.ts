@@ -121,3 +121,12 @@ export async function updateTrigger(funcId: string, triggerId: string, body: Par
 export async function deleteTrigger(funcId: string, triggerId: string): Promise<void> {
   return api<void>(`/serverless/functions/${funcId}/triggers/${triggerId}`, { method: "DELETE" });
 }
+
+export interface FunctionQuota {
+  current: number;
+  max: number;
+}
+
+export async function getQuota(): Promise<FunctionQuota> {
+  return api<FunctionQuota>("/serverless/functions/quota");
+}
