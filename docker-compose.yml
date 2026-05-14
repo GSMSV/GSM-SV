@@ -21,6 +21,7 @@ services:
   backend:
     build:
       context: ./backend
+      network: host
     restart: always
     depends_on:
       db:
