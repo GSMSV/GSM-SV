@@ -10,7 +10,7 @@ on:
         required: true
         default: 'all'
         type: choice
-        options: [backend, frontend, serverless, all]
+        options: [backend, serverless, all]
 
 permissions:
   contents: read
@@ -25,7 +25,6 @@ jobs:
     runs-on: self-hosted
     outputs:
       backend: ${{ steps.changes.outputs.backend }}
-      frontend: ${{ steps.changes.outputs.frontend }}
       serverless: ${{ steps.changes.outputs.serverless }}
       global: ${{ steps.changes.outputs.global }}
     steps:
@@ -40,22 +39,14 @@ jobs:
             SERVICE="${{ inputs.service }}"
             if [ "$SERVICE" = "backend" ]; then
               echo "backend=true" >> "$GITHUB_OUTPUT"
-              echo "frontend=false" >> "$GITHUB_OUTPUT"
-              echo "serverless=false" >> "$GITHUB_OUTPUT"
-              echo "global=false" >> "$GITHUB_OUTPUT"
-            elif [ "$SERVICE" = "frontend" ]; then
-              echo "backend=false" >> "$GITHUB_OUTPUT"
-              echo "frontend=true" >> "$GITHUB_OUTPUT"
               echo "serverless=false" >> "$GITHUB_OUTPUT"
               echo "global=false" >> "$GITHUB_OUTPUT"
             elif [ "$SERVICE" = "serverless" ]; then
               echo "backend=false" >> "$GITHUB_OUTPUT"
-              echo "frontend=false" >> "$GITHUB_OUTPUT"
               echo "serverless=true" >> "$GITHUB_OUTPUT"
               echo "global=false" >> "$GITHUB_OUTPUT"
             else
               echo "backend=false" >> "$GITHUB_OUTPUT"
-              echo "frontend=false" >> "$GITHUB_OUTPUT"
               echo "serverless=false" >> "$GITHUB_OUTPUT"
               echo "global=true" >> "$GITHUB_OUTPUT"
             fi
@@ -73,13 +64,6 @@ jobs:
             echo "backend=false" >> "$GITHUB_OUTPUT"
           fi
 
-          # frontend/** 또는 frontend-cd 워크플로우 자체가 변경됐는지 확인
-          if echo "$CHANGED" | grep -qE '^frontend/|^\.github/workflows/cd\.yml$'; then
-            echo "frontend=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "frontend=false" >> "$GITHUB_OUTPUT"
-          fi
-
           # serverless/** 또는 cd 워크플로우 자체가 변경됐는지 확인
           if echo "$CHANGED" | grep -qE '^serverless/|^\.github/workflows/cd\.yml$'; then
             echo "serverless=true" >> "$GITHUB_OUTPUT"
@@ -90,7 +74,7 @@ jobs:
           # global 트리거 대상 파일이 변경됐는지 확인
           # (backend/frontend/serverless 외의 실질적인 파일 변경 = docker-compose, nginx, .env 등)
           GLOBAL=$(echo "$CHANGED" \
-            | grep -vE '^(backend|frontend|serverless|\.agents|\.claude|\.codex)/' \
+            | grep -vE '^(backend|serverless|\.agents|\.claude|\.codex)/' \
             | grep -v '\.md$' \
             | grep -v '^\.gitignore$' \
             | grep -v '^\.github/workflows/')
@@ -131,42 +115,6 @@ jobs:
             if [ "$i" -eq "$MAX" ]; then
               echo "Timeout: backend did not become healthy within $((MAX * 5)) seconds."
               docker compose logs backend --tail=50
-              exit 1
-            fi
-            sleep 5
-          done
-
-  deploy-frontend:
-    name: Deploy Frontend
-    needs: detect
-    # global 파일이 함께 변경됐으면 deploy-all이 담당하므로 skip
-    if: needs.detect.outputs.frontend == 'true' && needs.detect.outputs.global == 'false'
-    runs-on: self-hosted
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Copy .env
-        run: cp "${{ secrets.DEPLOY_ENV_PATH }}" .env
-
-      - name: Build frontend image
-        run: docker compose build frontend
-
-      - name: Restart frontend container
-        run: docker compose up -d --no-deps frontend
-
-      - name: Verify frontend status
-        run: |
-          MAX=12
-          for i in $(seq 1 $MAX); do
-            echo "Waiting for frontend... ($i/$MAX)"
-            if docker compose ps frontend | grep -q "Up"; then
-              echo "frontend is Up."
-              docker compose ps frontend
-              exit 0
-            fi
-            if [ "$i" -eq "$MAX" ]; then
-              echo "Timeout: frontend did not become healthy within $((MAX * 5)) seconds."
-              docker compose logs frontend --tail=50
               exit 1
             fi
             sleep 5
