@@ -55,22 +55,6 @@ services:
     networks:
       - serverless-net
 
-  frontend:
-    build:
-      context: ./frontend
-      args:
-        NEXT_PUBLIC_DISCORD_URL: ${NEXT_PUBLIC_DISCORD_URL}
-        API_URL: http://backend:8000
-    restart: always
-    depends_on:
-      - backend
-    environment:
-      API_URL: http://backend:8000
-    ports:
-      - "127.0.0.1:3000:3000"
-    networks:
-      - internal-net
-
 volumes:
   pgdata:
   uploads:
