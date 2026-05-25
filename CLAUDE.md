@@ -106,6 +106,7 @@ Proxmox VE 기반 VM 신청·관리 플랫폼 + Serverless 함수 실행 서비�
 | Proxmox `verify_ssl=False` | 내부망 + 자체 서명 인증서 |
 | Proxmox 180초 타임아웃 | VM 클론·스냅샷 장시간 작업 |
 | CORS `allow_headers=["*"]` | 동일 도메인 운영 |
+| 같은 이메일의 `USER` + `PROJECT_OWNER` 계정 공존 | 일반 사용자 계정과 프로젝트 오너 계정은 별개 계정 정책. OAuth/DataGSM 로그인은 `USER` row 기준으로 처리하며, `PROJECT_OWNER` row 존재만으로 차단하거나 병합하면 안 됨. 단, `ADMIN` row가 같은 이메일에 있으면 OAuth는 409로 차단 |
 
 ---
 
