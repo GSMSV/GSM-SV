@@ -537,7 +537,7 @@ def delete_vm(
         if vm_record.internal_ip:
             vm_ports = db.query(VmPort).filter(VmPort.vm_id == vm_record.id).all()
             for port in vm_ports:
-                source_ip = port.source if port.source and port.source != "0.0.0.0/0" else None
+                source_ip = port.source
                 protocols = ["tcp", "udp"] if port.protocol == "tcp/udp" else [port.protocol]
                 for proto in protocols:
                     success = manage_custom_iptables(
