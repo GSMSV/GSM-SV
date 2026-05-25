@@ -205,6 +205,29 @@ class TestOAuthRoleConflict:
         db.commit()
         assert self._call_callback(oauth_client, "admin@gsm.hs.kr") == 409
 
+    def test_admin_email_blocks_even_with_existing_user(self, db, oauth_client):
+        """ADMIN+USER 듀얼 row가 있으면 OAuth는 USER row가 있어도 409"""
+        db.add_all(
+            [
+                User(
+                    email="admin-dual@gsm.hs.kr",
+                    hashed_password=None,
+                    role=UserRole.USER,
+                    is_active=True,
+                    oauth_provider="datagsm",
+                    oauth_sub="old-sub",
+                ),
+                User(
+                    email="admin-dual@gsm.hs.kr",
+                    hashed_password="x",
+                    role=UserRole.ADMIN,
+                    is_active=True,
+                ),
+            ]
+        )
+        db.commit()
+        assert self._call_callback(oauth_client, "admin-dual@gsm.hs.kr") == 409
+
     def test_project_owner_email_can_create_user_account(self, db, oauth_client):
         """PROJECT_OWNER만 있는 이메일로 OAuth 시도 시 USER 계정을 별도로 생성"""
         db.add(

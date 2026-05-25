@@ -5,10 +5,17 @@
 - TestManageCustomIptables: manage_custom_iptables() 단위 테스트 (paramiko mock)
 - TestManageCustomIptablesManual: 실제 게이트웨이 + VM 연결 확인 (수동 실행)
 """
+import asyncio
 import socket
 import pytest
 from unittest.mock import MagicMock, patch
+from fastapi import HTTPException
+from models.server import Server
+from models.user import User, UserRole
+from models.vm import Vm
 from models.vm_port import VmPort
+from schemas.fw_schema import VmPortCreate
+from api.routes.firewall import add_custom_port
 from services.network_service import allocate_random_port, manage_custom_iptables
 
 
@@ -64,6 +71,15 @@ def _make_ssh_mock():
     stderr.read.return_value = b""
     ssh.exec_command.return_value = (MagicMock(), stdout, stderr)
     return ssh
+
+
+def _make_command_result(exit_status=0, stderr_text=""):
+    stdout = MagicMock()
+    stdout.channel.recv_exit_status.return_value = exit_status
+    stdout.read.return_value = b"# iptables rules\n"
+    stderr = MagicMock()
+    stderr.read.return_value = stderr_text.encode()
+    return MagicMock(), stdout, stderr
 
 
 class TestManageCustomIptables:
@@ -163,6 +179,87 @@ class TestManageCustomIptables:
                 protocol="tcp",
                 action="ADD",
             )
+
+    @patch("services.network_service.paramiko.SSHClient")
+    def test_add_failure_runs_remaining_commands_and_rollback(self, mock_ssh_cls):
+        ssh = MagicMock()
+        ssh.exec_command.side_effect = [
+            _make_command_result(1, "DNAT failed"),
+            _make_command_result(0),
+            _make_command_result(0),
+            _make_command_result(0),
+            _make_command_result(0),
+        ]
+        mock_ssh_cls.return_value = ssh
+        server = _make_server()
+
+        result = manage_custom_iptables(
+            server=server,
+            vm_ip="10.0.0.5",
+            internal_port=443,
+            external_port=31234,
+            protocol="tcp",
+            action="ADD",
+        )
+
+        assert result is False
+        executed_cmds = [c.args[0] for c in ssh.exec_command.call_args_list]
+        assert any("FORWARD" in c and "-A" in c for c in executed_cmds)
+        assert any("PREROUTING" in c and "-D" in c for c in executed_cmds)
+        assert any("FORWARD" in c and "-D" in c for c in executed_cmds)
+
+
+class TestAddCustomPortRollback:
+    """커스텀 포트 추가 실패 시 DB 선점 레코드 rollback"""
+
+    def _make_user_vm(self, db):
+        user = User(email="fw@gsm.hs.kr", hashed_password="h", role=UserRole.USER, is_active=True)
+        server = Server(
+            name="test-node",
+            ip_address="192.168.1.10",
+            port=8006,
+            api_user="root@pam",
+            api_password="password",
+            is_active=True,
+            gateway_ip="192.168.1.1",
+            gateway_user="admin",
+            gateway_password="gwpass",
+            base_port=21000,
+        )
+        db.add_all([user, server])
+        db.commit()
+        db.refresh(user)
+        db.refresh(server)
+        vm = Vm(
+            hypervisor_vmid=200,
+            name="test-vm",
+            server_id=server.id,
+            owner_id=user.id,
+            internal_ip="10.0.0.100",
+        )
+        db.add(vm)
+        db.commit()
+        db.refresh(vm)
+        return user
+
+    def test_value_error_removes_reserved_port(self, db):
+        user = self._make_user_vm(db)
+        body = VmPortCreate(
+            internal_port=8080,
+            protocol="tcp",
+            source="192.168.1.10/32",
+            description="test",
+        )
+
+        with patch("api.routes.firewall.allocate_random_port", return_value=33333), patch(
+            "api.routes.firewall.manage_custom_iptables",
+            side_effect=ValueError("잘못된 source IP/CIDR 형식"),
+        ):
+            with pytest.raises(HTTPException) as exc_info:
+                asyncio.run(add_custom_port("test-node", 200, body, db=db, current_user=user))
+
+        assert exc_info.value.status_code == 400
+        assert db.query(VmPort).count() == 0
 
 
 # ── 수동 스모크 테스트 ─────────────────────────────────────────────────────────

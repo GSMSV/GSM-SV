@@ -24,11 +24,14 @@ PORT_OFFSETS = {
 
 def calculate_ports(base_port: int, vmid: int):
     """정책에 따라 포트 번호를 계산합니다."""
-    return {
+    ports = {
         "ssh": base_port + PORT_OFFSETS["ssh"] + vmid,
         "svc1": base_port + PORT_OFFSETS["svc1"] + vmid,
         "svc2": base_port + PORT_OFFSETS["svc2"] + vmid,
     }
+    for name, port in ports.items():
+        _validate_port(port, name)
+    return ports
 
 _IP_PATTERN = re.compile(r'^(\d{1,3}\.){3}\d{1,3}$')
 
@@ -45,7 +48,7 @@ def _validate_ip(ip: str) -> str:
 def _validate_port(port: int, name: str = "port") -> int:
     """iptables 명령에 사용할 포트 범위를 검증합니다."""
     if not isinstance(port, int) or not (1 <= port <= 65535):
-        raise ValueError(f"잘못된 {name} 범위: {port}")
+        raise ValueError(f"{name} 포트는 유효 범위(1~65535)여야 합니다: {port}")
     return port
 
 
@@ -74,6 +77,36 @@ def _iptables_command(table: Optional[str], chain: str, rule_args: str, action: 
     )
 
 
+def _run_iptables_commands(
+    ssh: paramiko.SSHClient,
+    commands: list[str],
+    rollback_commands: Optional[list[str]] = None,
+) -> bool:
+    """모든 iptables 명령을 실행하고 실패 시 가능한 rollback까지 시도합니다."""
+    success = True
+    for cmd in commands:
+        logger.info(f"Executing iptables command: {cmd}")
+        _, stdout_ch, stderr_ch = ssh.exec_command(cmd)
+        exit_status = stdout_ch.channel.recv_exit_status()
+        if exit_status != 0:
+            err = stderr_ch.read().decode()
+            logger.error(f"iptables command failed (exit {exit_status}): {err}")
+            success = False
+
+    if not success and rollback_commands:
+        for cmd in rollback_commands:
+            try:
+                logger.info(f"Rolling back iptables command: {cmd}")
+                _, stdout_ch, stderr_ch = ssh.exec_command(cmd)
+                exit_status = stdout_ch.channel.recv_exit_status()
+                if exit_status != 0:
+                    err = stderr_ch.read().decode()
+                    logger.error(f"iptables rollback failed (exit {exit_status}): {err}")
+            except Exception as e:
+                logger.error(f"iptables rollback error: {e}")
+    return success
+
+
 def manage_iptables(server: Server, vmid: int, vm_ip: str, action: str = "ADD"):
     """
     Router에 SSH로 접속하여 iptables DNAT 규칙을 추가하거나 삭제합니다.
@@ -94,6 +127,7 @@ def manage_iptables(server: Server, vmid: int, vm_ip: str, action: str = "ADD"):
     # iptables 명령어 생성 (예시: DNAT 설정)
     # -i {인터페이스} 는 환경에 따라 다를 수 있으므로 여기선 생략하거나 기본값 사용
     commands = []
+    rollback_commands = []
     
     # (공개포트, 내부포트, 프로토콜 목록)
     port_mapping = [
@@ -110,6 +144,9 @@ def manage_iptables(server: Server, vmid: int, vm_ip: str, action: str = "ADD"):
             forward_args = f"-p {proto} -d {vm_ip} --dport {internal_port} -m state --state NEW,ESTABLISHED,RELATED -j ACCEPT"
             commands.append(_iptables_command("nat", "PREROUTING", dnat_args, action))
             commands.append(_iptables_command(None, "FORWARD", forward_args, action))
+            if action == "ADD":
+                rollback_commands.append(_iptables_command("nat", "PREROUTING", dnat_args, "DELETE"))
+                rollback_commands.append(_iptables_command(None, "FORWARD", forward_args, "DELETE"))
 
     ssh = paramiko.SSHClient()
     try:
@@ -121,19 +158,16 @@ def manage_iptables(server: Server, vmid: int, vm_ip: str, action: str = "ADD"):
             timeout=10
         )
 
-        for cmd in commands:
-            logger.info(f"Executing on {server.gateway_ip}: {cmd}")
-            _, stdout_ch, stderr_ch = ssh.exec_command(cmd)
-            exit_status = stdout_ch.channel.recv_exit_status()
-            if exit_status != 0:
-                err = stderr_ch.read().decode()
-                logger.error(f"iptables command failed (exit {exit_status}): {err}")
-                return False
+        success = _run_iptables_commands(
+            ssh,
+            commands,
+            rollback_commands if action == "ADD" else None,
+        )
 
         # iptables 백업 (변경 후 자동 저장)
         _backup_iptables(ssh, server.gateway_ip)
 
-        return True
+        return success
     except Exception as e:
         logger.error(f"Gateway SSH 접속 및 iptables 설정 실패: {e}")
         # 생성/삭제 핵심 로직을 멈추지는 않되 로그를 기록함
@@ -187,6 +221,10 @@ def manage_custom_iptables(
         _iptables_command("nat", "PREROUTING", dnat_args, action),
         _iptables_command(None, "FORWARD", forward_args, action),
     ]
+    rollback_commands = [
+        _iptables_command("nat", "PREROUTING", dnat_args, "DELETE"),
+        _iptables_command(None, "FORWARD", forward_args, "DELETE"),
+    ] if action == "ADD" else None
 
     ssh = paramiko.SSHClient()
     try:
@@ -197,16 +235,9 @@ def manage_custom_iptables(
             password=server.gateway_password or "",
             timeout=10,
         )
-        for cmd in commands:
-            logger.info(f"Executing on {server.gateway_ip}: {cmd}")
-            _, stdout_ch, stderr_ch = ssh.exec_command(cmd)
-            exit_status = stdout_ch.channel.recv_exit_status()
-            if exit_status != 0:
-                err = stderr_ch.read().decode()
-                logger.error(f"iptables command failed (exit {exit_status}): {err}")
-                return False
+        success = _run_iptables_commands(ssh, commands, rollback_commands)
         _backup_iptables(ssh, server.gateway_ip)
-        return True
+        return success
     except Exception as e:
         logger.error(f"Gateway SSH 접속 및 커스텀 iptables 설정 실패: {e}")
         return False

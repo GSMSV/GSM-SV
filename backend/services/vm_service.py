@@ -341,6 +341,7 @@ def create_vm(
     vm_name, vm_display_name = _generate_vm_name(current_user, tier.value, custom_name=name)
     vm_password = _generate_password()
     clone_started = False  # clone 시작 여부 추적
+    iptables_attempted = False
 
     try:
         # 5. 템플릿 Full Clone
@@ -394,7 +395,9 @@ def create_vm(
         )
 
         # 8. iptables 포트포워딩 등록
-        manage_iptables(server, vmid, internal_ip, action="ADD")
+        iptables_attempted = True
+        if not manage_iptables(server, vmid, internal_ip, action="ADD"):
+            raise RuntimeError("iptables 포트포워딩 등록에 실패했습니다.")
 
         # 9. VM 부팅
         proxmox.nodes(server.name).qemu(vmid).status.start.post()
@@ -490,6 +493,11 @@ def create_vm(
                 proxmox.nodes(server.name).qemu(vmid).delete(purge=1)
             except Exception:
                 logger.warning(f"VM {vmid} 생성 실패 후 정리 중 오류 (수동 확인 필요)")
+        if iptables_attempted:
+            try:
+                manage_iptables(server, vmid, internal_ip, action="DELETE")
+            except Exception as cleanup_error:
+                logger.warning(f"VM {vmid} 생성 실패 후 iptables 정리 중 오류: {cleanup_error}")
         try:
             _delete_snippet(server, f"user-data-{vmid}.yaml")
         except Exception:
@@ -536,6 +544,7 @@ def delete_vm(
         # VmPort에 저장된 실제 external_port 기준으로 iptables 규칙 제거
         if vm_record.internal_ip:
             vm_ports = db.query(VmPort).filter(VmPort.vm_id == vm_record.id).all()
+            has_default_ports = any(port.is_default for port in vm_ports)
             for port in vm_ports:
                 source_ip = port.source
                 protocols = ["tcp", "udp"] if port.protocol == "tcp/udp" else [port.protocol]
@@ -556,7 +565,8 @@ def delete_vm(
                         )
 
             # 과거 데이터에 VmPort 기본 포트 레코드가 없을 수 있어 기존 계산식도 fallback으로 수행
-            manage_iptables(server, vmid, vm_record.internal_ip, action="DELETE")
+            if not has_default_ports:
+                manage_iptables(server, vmid, vm_record.internal_ip, action="DELETE")
 
         # VmPort 레코드 일괄 삭제 (VM record 삭제 전 FK 제약 해소)
         db.query(VmPort).filter(VmPort.vm_id == vm_record.id).delete()

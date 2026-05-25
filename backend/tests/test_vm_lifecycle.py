@@ -13,6 +13,7 @@ from core.database import Base
 from models.user import User, UserRole
 from models.server import Server
 from models.vm import Vm
+from models.vm_port import VmPort
 from models.notification import Notification
 from schemas.vm_schema import VMCreate, VMTier
 from services.vm_service import (
@@ -470,6 +471,53 @@ class TestVMDeletionHappyPath:
         # 알림 생성 확인
         notif = db.query(Notification).filter(Notification.user_id == user.id).first()
         assert notif is not None
+
+    @patch("services.vm_service.manage_custom_iptables", return_value=True)
+    @patch("services.vm_service.manage_iptables", return_value=True)
+    @patch("services.vm_service.get_proxmox_for_server")
+    def test_default_vm_ports_do_not_trigger_formula_fallback(
+        self, mock_proxmox_fn, mock_iptables, mock_custom_iptables, db, user, server
+    ):
+        """기본 VmPort가 있으면 계산식 fallback 삭제를 중복 실행하지 않는다."""
+        proxmox = _make_mock_proxmox()
+        mock_proxmox_fn.return_value = proxmox
+
+        vm = Vm(
+            hypervisor_vmid=200,
+            name="test-vm",
+            server_id=server.id,
+            owner_id=user.id,
+            internal_ip="10.0.0.100",
+        )
+        db.add(vm)
+        db.commit()
+        db.refresh(vm)
+        db.add_all(
+            [
+                VmPort(
+                    vm_id=vm.id,
+                    internal_port=22,
+                    external_port=21200,
+                    protocol="tcp",
+                    source="0.0.0.0/0",
+                    is_default=True,
+                ),
+                VmPort(
+                    vm_id=vm.id,
+                    internal_port=10000,
+                    external_port=23200,
+                    protocol="tcp/udp",
+                    source="0.0.0.0/0",
+                    is_default=True,
+                ),
+            ]
+        )
+        db.commit()
+
+        delete_vm(db, vm)
+
+        mock_iptables.assert_not_called()
+        assert mock_custom_iptables.call_count == 3
 
 
 # ── 포트 범위 검증 ────────────────────────────────────────────
