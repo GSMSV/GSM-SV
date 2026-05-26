@@ -1,13 +1,14 @@
 """_notify_admins_background_failure 단위 테스트."""
 
 import pytest
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta
 from unittest.mock import patch
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from core.database import Base
 from core.security import get_password_hash
+from core.timezone import KST
 from models.notification import Notification
 from models.server import Server
 from models.user import User, UserRole
@@ -117,9 +118,6 @@ class TestNotifyAdminsBackgroundFailure:
         assert db.query(Notification).count() == 0
 
 
-KST = timezone(timedelta(hours=9))
-
-
 class TestNextNotifySleepSeconds:
     """_next_notify_sleep_seconds 순수 함수 단위 테스트."""
 
@@ -193,8 +191,8 @@ class TestSendAdminExpiryNotifications:
         assert "vm-alpha(3일 4시간)" in notifs[0].message
         assert notifs[0].type == "info"
 
-    def test_no_vms_sends_empty_message(self, db):
-        """7일 이내 만료 VM 없으면 '만료 임박 VM 없음' 발송."""
+    def test_no_vms_sends_no_notification(self, db):
+        """7일 이내 만료 VM 없으면 알림 발송 안 함."""
         from main import _send_admin_expiry_notifications
         now = datetime(2026, 5, 26, 12, 0, 0)
         admin = _make_admin(db, "admin2@gsm.hs.kr")
@@ -203,9 +201,7 @@ class TestSendAdminExpiryNotifications:
         _send_admin_expiry_notifications(db, now)
 
         db.expire_all()
-        notifs = db.query(Notification).filter(Notification.user_id == admin.id).all()
-        assert len(notifs) == 1
-        assert notifs[0].message == "만료 임박 VM 없음"
+        assert db.query(Notification).filter(Notification.user_id == admin.id).count() == 0
 
     def test_expired_vm_excluded(self, db):
         """이미 만료된 VM(expires_at <= now)은 포함 안 됨."""
@@ -219,8 +215,7 @@ class TestSendAdminExpiryNotifications:
         _send_admin_expiry_notifications(db, now)
 
         db.expire_all()
-        notif = db.query(Notification).filter(Notification.user_id == admin.id).first()
-        assert notif.message == "만료 임박 VM 없음"
+        assert db.query(Notification).filter(Notification.user_id == admin.id).count() == 0
 
     def test_vm_beyond_7_days_excluded(self, db):
         """8일 후 만료 VM은 포함 안 됨."""
@@ -234,15 +229,16 @@ class TestSendAdminExpiryNotifications:
         _send_admin_expiry_notifications(db, now)
 
         db.expire_all()
-        notif = db.query(Notification).filter(Notification.user_id == admin.id).first()
-        assert notif.message == "만료 임박 VM 없음"
+        assert db.query(Notification).filter(Notification.user_id == admin.id).count() == 0
 
     def test_multiple_admins_each_get_one_notification(self, db):
         """ADMIN 2명이면 각자 알림 1개씩."""
         from main import _send_admin_expiry_notifications
         now = datetime(2026, 5, 26, 12, 0, 0)
+        server = _make_server(db)
         _make_admin(db, "a1@gsm.hs.kr")
         _make_admin(db, "a2@gsm.hs.kr")
+        _make_vm(db, "vm-soon", server, now + timedelta(days=3))
         db.commit()
 
         _send_admin_expiry_notifications(db, now)

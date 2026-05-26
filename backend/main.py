@@ -99,16 +99,16 @@ def _send_admin_expiry_notifications(db, now) -> None:
         .all()
     )
 
-    if soon_vms:
-        parts = []
-        for vm in soon_vms:
-            delta = vm.expires_at - now
-            days = delta.days
-            hours = delta.seconds // 3600
-            parts.append(f"{vm.name}({days}일 {hours}시간)")
-        message = f"만료 임박 VM {len(soon_vms)}개: {', '.join(parts)}"
-    else:
-        message = "만료 임박 VM 없음"
+    if not soon_vms:
+        return
+
+    parts = []
+    for vm in soon_vms:
+        delta = vm.expires_at - now
+        days = delta.days
+        hours = delta.seconds // 3600
+        parts.append(f"{vm.name}({days}일 {hours}시간)")
+    message = f"만료 임박 VM {len(soon_vms)}개: {', '.join(parts)}"
 
     admins = (
         db.query(User)
