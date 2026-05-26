@@ -3,11 +3,13 @@ import re
 import string
 import secrets
 import time
+import threading
 import paramiko
 from datetime import timedelta
 from core.timezone import now_kst
 
 from fastapi import HTTPException, status
+from sqlalchemy import event, text
 from sqlalchemy.orm import Session
 from core.config import settings
 from core.constants import TIER_SPECS
@@ -20,6 +22,10 @@ from models.notification import Notification
 from models.vm_port import VmPort
 
 logger = logging.getLogger(__name__)
+
+_IP_ALLOCATION_LOCK_KEY = 0x47534D53
+_fallback_ip_allocation_lock = threading.Lock()
+_FALLBACK_LOCK_INFO_KEY = "internal_ip_allocation_lock_held"
 
 # ── 헬퍼 함수 ──────────────────────────────────────────────
 
@@ -71,18 +77,42 @@ def _get_next_vmid(proxmox, node_name: str) -> int:
         return max_id + 1
 
 
+def _release_fallback_ip_allocation_lock(session: Session) -> None:
+    lock = session.info.pop(_FALLBACK_LOCK_INFO_KEY, None)
+    if lock:
+        lock.release()
+
+
+def _acquire_internal_ip_allocation_lock(db: Session) -> None:
+    """IP 조회부터 예약 row 커밋까지 같은 트랜잭션에서 직렬화합니다."""
+    dialect_name = db.get_bind().dialect.name
+    if dialect_name == "postgresql":
+        db.execute(
+            text("SELECT pg_advisory_xact_lock(:lock_key)"),
+            {"lock_key": _IP_ALLOCATION_LOCK_KEY},
+        )
+        return
+
+    if db.info.get(_FALLBACK_LOCK_INFO_KEY):
+        return
+
+    _fallback_ip_allocation_lock.acquire()
+    db.info[_FALLBACK_LOCK_INFO_KEY] = _fallback_ip_allocation_lock
+    event.listen(db, "after_commit", _release_fallback_ip_allocation_lock, once=True)
+    event.listen(db, "after_rollback", _release_fallback_ip_allocation_lock, once=True)
+
+
 def _allocate_internal_ip(db: Session) -> str:
     """
     DB에서 사용 중인 internal_ip를 조회하고,
     10.0.0.100 ~ 10.0.0.254 범위에서 빈 IP를 반환합니다.
-    with_for_update()로 동시 할당 시 중복을 방지합니다 (PostgreSQL).
+    트랜잭션 단위 advisory lock으로 동시 할당 시 중복을 방지합니다.
     """
+    _acquire_internal_ip_allocation_lock(db)
+
     used_ips = {
         vm.internal_ip
-        for vm in db.query(Vm.internal_ip)
-            .filter(Vm.internal_ip.isnot(None))
-            .with_for_update()
-            .all()
+        for vm in db.query(Vm.internal_ip).filter(Vm.internal_ip.isnot(None)).all()
     }
 
     prefix = settings.INTERNAL_SUBNET
@@ -347,18 +377,16 @@ def create_vm(
         template_vmid = settings.TEMPLATE_VMID
         default_user = settings.VM_DEFAULT_USER
 
-    # 3. 내부 IP 할당
-    internal_ip = _allocate_internal_ip(db)
-
-    # 4. Proxmox 연결 & VMID 할당
+    # 3. Proxmox 연결 & VMID 할당 (IP 락 취득 전에 완료)
     proxmox = get_proxmox_for_server(server)
     vmid = _get_next_vmid(proxmox, server.name)
     vm_name, vm_display_name = _generate_vm_name(current_user, tier.value, custom_name=name)
     vm_password = _generate_password()
 
-    # IP 예약: VM 레코드를 즉시 커밋해 with_for_update() 락을 빠르게 해제합니다.
-    # 커밋 전까지 락을 유지하면 Proxmox 작업(최대 수 분) 동안 다른 VM 생성 요청이
-    # DB 커넥션을 점유한 채 대기하여 커넥션 풀을 고갈시킬 수 있습니다.
+    # 4. 내부 IP 할당 후 VM 레코드 즉시 커밋 → IP 예약 락 최소화
+    # _allocate_internal_ip이 트랜잭션 단위 락을 잡으므로 커밋 전까지 다른 VM 생성 요청이
+    # 블로킹됩니다. 커밋 전 구간을 순수 로컬 연산만으로 한정해 락 윈도우를 최소화합니다.
+    internal_ip = _allocate_internal_ip(db)
     expires_at = None
     if current_user.role == UserRole.USER:
         expires_at = now_kst() + timedelta(days=30)
