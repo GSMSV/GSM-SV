@@ -112,3 +112,143 @@ class TestNotifyAdminsBackgroundFailure:
             _notify_admins_background_failure("expire", 5)
 
         assert db.query(Notification).count() == 0
+
+
+from datetime import datetime, timezone, timedelta
+
+KST = timezone(timedelta(hours=9))
+
+
+class TestNextNotifySleepSeconds:
+    """_next_notify_sleep_seconds 순수 함수 단위 테스트."""
+
+    def _now(self, hour, minute=0):
+        return datetime(2026, 5, 26, hour, minute, 0, tzinfo=KST)
+
+    def test_next_hour_today(self):
+        """현재 05:30 → 다음 06:00까지 30분."""
+        from main import _next_notify_sleep_seconds
+        now = self._now(5, 30)
+        secs = _next_notify_sleep_seconds(now, [0, 6, 12, 18])
+        assert secs == 30 * 60
+
+    def test_next_is_tomorrow(self):
+        """현재 19:00 → 다음 00:00(익일)까지 5시간."""
+        from main import _next_notify_sleep_seconds
+        now = self._now(19, 0)
+        secs = _next_notify_sleep_seconds(now, [0, 6, 12, 18])
+        assert secs == 5 * 3600
+
+    def test_exact_boundary_skipped(self):
+        """현재 정확히 06:00 → 다음 12:00까지 6시간."""
+        from main import _next_notify_sleep_seconds
+        now = self._now(6, 0)
+        secs = _next_notify_sleep_seconds(now, [0, 6, 12, 18])
+        assert secs == 6 * 3600
+
+
+from models.vm import Vm
+from models.server import Server
+
+
+def _make_server(db):
+    s = Server(name="pve-test", ip_address="10.0.0.1", port=8006, api_user="root")
+    s.api_password = "pw"
+    db.add(s)
+    db.flush()
+    return s
+
+
+def _make_admin(db, email):
+    u = User(email=email, hashed_password=get_password_hash("Pass1!aa"),
+             role=UserRole.ADMIN, is_active=True)
+    db.add(u)
+    db.flush()
+    return u
+
+
+def _make_vm(db, name, server, expires_at):
+    v = Vm(hypervisor_vmid=100, name=name, server_id=server.id,
+           allocated_ram_mb=2048, allocated_cores=2, expires_at=expires_at)
+    db.add(v)
+    db.flush()
+    return v
+
+
+class TestSendAdminExpiryNotifications:
+    """_send_admin_expiry_notifications 단위 테스트."""
+
+    def test_vms_within_7_days_sends_list(self, db):
+        """7일 이내 만료 VM 있으면 목록 포함 메시지 발송."""
+        from main import _send_admin_expiry_notifications
+        now = datetime(2026, 5, 26, 12, 0, 0)
+        server = _make_server(db)
+        admin = _make_admin(db, "admin@gsm.hs.kr")
+        _make_vm(db, "vm-alpha", server, now + timedelta(days=3, hours=4))
+        db.commit()
+
+        _send_admin_expiry_notifications(db, now)
+
+        db.expire_all()
+        notifs = db.query(Notification).filter(Notification.user_id == admin.id).all()
+        assert len(notifs) == 1
+        assert "만료 임박 VM 1개" in notifs[0].message
+        assert "vm-alpha(3일 4시간)" in notifs[0].message
+        assert notifs[0].type == "info"
+
+    def test_no_vms_sends_empty_message(self, db):
+        """7일 이내 만료 VM 없으면 '만료 임박 VM 없음' 발송."""
+        from main import _send_admin_expiry_notifications
+        now = datetime(2026, 5, 26, 12, 0, 0)
+        admin = _make_admin(db, "admin2@gsm.hs.kr")
+        db.commit()
+
+        _send_admin_expiry_notifications(db, now)
+
+        db.expire_all()
+        notifs = db.query(Notification).filter(Notification.user_id == admin.id).all()
+        assert len(notifs) == 1
+        assert notifs[0].message == "만료 임박 VM 없음"
+
+    def test_expired_vm_excluded(self, db):
+        """이미 만료된 VM(expires_at <= now)은 포함 안 됨."""
+        from main import _send_admin_expiry_notifications
+        now = datetime(2026, 5, 26, 12, 0, 0)
+        server = _make_server(db)
+        admin = _make_admin(db, "admin3@gsm.hs.kr")
+        _make_vm(db, "expired-vm", server, now - timedelta(hours=1))
+        db.commit()
+
+        _send_admin_expiry_notifications(db, now)
+
+        db.expire_all()
+        notif = db.query(Notification).filter(Notification.user_id == admin.id).first()
+        assert notif.message == "만료 임박 VM 없음"
+
+    def test_vm_beyond_7_days_excluded(self, db):
+        """8일 후 만료 VM은 포함 안 됨."""
+        from main import _send_admin_expiry_notifications
+        now = datetime(2026, 5, 26, 12, 0, 0)
+        server = _make_server(db)
+        admin = _make_admin(db, "admin4@gsm.hs.kr")
+        _make_vm(db, "far-vm", server, now + timedelta(days=8))
+        db.commit()
+
+        _send_admin_expiry_notifications(db, now)
+
+        db.expire_all()
+        notif = db.query(Notification).filter(Notification.user_id == admin.id).first()
+        assert notif.message == "만료 임박 VM 없음"
+
+    def test_multiple_admins_each_get_one_notification(self, db):
+        """ADMIN 2명이면 각자 알림 1개씩."""
+        from main import _send_admin_expiry_notifications
+        now = datetime(2026, 5, 26, 12, 0, 0)
+        _make_admin(db, "a1@gsm.hs.kr")
+        _make_admin(db, "a2@gsm.hs.kr")
+        db.commit()
+
+        _send_admin_expiry_notifications(db, now)
+
+        db.expire_all()
+        assert db.query(Notification).count() == 2
