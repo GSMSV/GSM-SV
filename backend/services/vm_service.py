@@ -75,10 +75,14 @@ def _allocate_internal_ip(db: Session) -> str:
     """
     DB에서 사용 중인 internal_ip를 조회하고,
     10.0.0.100 ~ 10.0.0.254 범위에서 빈 IP를 반환합니다.
+    with_for_update()로 동시 할당 시 중복을 방지합니다 (PostgreSQL).
     """
     used_ips = {
         vm.internal_ip
-        for vm in db.query(Vm.internal_ip).filter(Vm.internal_ip.isnot(None)).all()
+        for vm in db.query(Vm.internal_ip)
+            .filter(Vm.internal_ip.isnot(None))
+            .with_for_update()
+            .all()
     }
 
     prefix = settings.INTERNAL_SUBNET
