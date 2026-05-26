@@ -76,6 +76,7 @@ def get_vm_with_owner_check(
     """
     DB에서 VM을 찾고 소유권을 확인하는 공통 헬퍼.
     node가 주어지면 해당 서버의 VM만 조회하여 다른 노드의 동일 vmid 충돌을 방지합니다.
+    비관리자는 항상 자신의 VM만 조회하므로 타인 VM은 404로 노출하지 않습니다.
     """
     from models.vm import Vm
     from models.server import Server
@@ -83,20 +84,13 @@ def get_vm_with_owner_check(
     query = db.query(Vm).filter(Vm.hypervisor_vmid == vmid)
     if node:
         query = query.join(Server).filter(Server.name == node)
-    elif current_user.role != UserRole.ADMIN:
-        # node 없이 vmid만으로 조회 시, 소유자 VM만 매칭 (동일 vmid 충돌 방지)
+    if current_user.role != UserRole.ADMIN:
         query = query.filter(Vm.owner_id == current_user.id)
     vm_record = query.first()
     if not vm_record:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"VM {vmid}를 데이터베이스에서 찾을 수 없습니다.",
-        )
-
-    if current_user.role != UserRole.ADMIN and vm_record.owner_id != current_user.id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="해당 VM에 접근할 권한이 없습니다.",
         )
 
     return vm_record
