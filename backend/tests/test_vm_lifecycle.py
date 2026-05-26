@@ -15,7 +15,8 @@ from models.server import Server
 from models.vm import Vm
 from models.vm_port import VmPort
 from models.notification import Notification
-from schemas.vm_schema import VMCreate, VMTier
+from schemas.vm_schema import VMCreate, VMTier, SnapshotCreateRequest
+from api.routes.vmcontrol import create_snapshot
 from services.vm_service import (
     create_vm,
     delete_vm,
@@ -24,6 +25,7 @@ from services.vm_service import (
 )
 from services.network_service import calculate_ports, manage_iptables
 from services.mon_service import update_server_stats
+from services.mon_service import get_best_server
 
 # ── 테스트용 DB 엔진 ──────────────────────────────────────────
 
@@ -568,3 +570,89 @@ class TestVMIDRetry:
         proxmox.cluster.nextid.get.side_effect = Exception("API error")
         proxmox.nodes.return_value.qemu.get.return_value = []
         assert _get_next_vmid(proxmox, "node1") == 100
+
+
+class TestBestServerRoleFilters:
+    """자동 서버 선택 시 역할별 노드 필터링 검증"""
+
+    def _add_server(self, db, name: str, ram: int) -> Server:
+        server = Server(
+            name=name,
+            ip_address=f"192.168.1.{len(name)}",
+            port=8006,
+            api_user="root@pam",
+            api_password="password",
+            is_active=True,
+            gateway_ip="192.168.1.1",
+            gateway_user="admin",
+            gateway_password="gwpass",
+            base_port=22000 + len(name),
+            last_free_ram_mb=ram,
+        )
+        db.add(server)
+        db.commit()
+        db.refresh(server)
+        return server
+
+    @patch("services.mon_service.update_server_stats")
+    def test_excluded_nodes_are_not_selected(self, mock_update, db, server):
+        mock_update.side_effect = lambda session, selected: selected.last_free_ram_mb
+        project = self._add_server(db, "project-node", 64000)
+
+        selected = get_best_server(
+            db,
+            required_ram_mb=2048,
+            excluded_nodes={project.name},
+        )
+
+        assert selected.name == server.name
+
+    @patch("services.mon_service.update_server_stats")
+    def test_allowed_nodes_limit_selection(self, mock_update, db, server):
+        mock_update.side_effect = lambda session, selected: selected.last_free_ram_mb
+        project = self._add_server(db, "project-node", 64000)
+
+        selected = get_best_server(
+            db,
+            required_ram_mb=2048,
+            allowed_nodes={project.name},
+        )
+
+        assert selected.name == project.name
+
+
+class TestSnapshotCreation:
+    """스냅샷 생성 정책 검증"""
+
+    @pytest.mark.asyncio
+    @patch("api.routes.vmcontrol.get_proxmox_for_server")
+    async def test_duplicate_snapshot_name_returns_400(self, mock_proxmox_fn, db, user, server):
+        proxmox = MagicMock()
+        qemu = proxmox.nodes.return_value.qemu.return_value
+        qemu.snapshot.get.return_value = [
+            {"name": "current"},
+            {"name": "manual-1"},
+        ]
+        mock_proxmox_fn.return_value = proxmox
+        db.add(Vm(
+            hypervisor_vmid=200,
+            name="test-vm",
+            server_id=server.id,
+            owner_id=user.id,
+            internal_ip="10.0.0.100",
+        ))
+        db.commit()
+
+        from fastapi import HTTPException
+        with pytest.raises(HTTPException) as exc_info:
+            await create_snapshot(
+                node=server.name,
+                vmid=200,
+                body=SnapshotCreateRequest(name="manual-1"),
+                db=db,
+                current_user=user,
+            )
+
+        assert exc_info.value.status_code == 400
+        assert "이미 존재" in exc_info.value.detail
+        qemu.snapshot.post.assert_not_called()
