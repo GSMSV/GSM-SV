@@ -46,10 +46,16 @@ def get_best_server(
     """
     # 1. 활성화된 모든 서버 목록 가져오기
     query = db.query(Server).filter(Server.is_active == True)
-    if allowed_nodes:
-        query = query.filter(Server.name.in_(set(allowed_nodes)))
-    if excluded_nodes:
-        query = query.filter(~Server.name.in_(set(excluded_nodes)))
+    if allowed_nodes is not None:
+        allowed_set = {node for node in allowed_nodes if node is not None}
+        if allowed_set:
+            query = query.filter(Server.name.in_(allowed_set))
+        else:
+            query = query.filter(Server.id == -1)
+    if excluded_nodes is not None:
+        excluded_set = {node for node in excluded_nodes if node is not None}
+        if excluded_set:
+            query = query.filter(~Server.name.in_(excluded_set))
     active_servers = query.all()
     
     if not active_servers:

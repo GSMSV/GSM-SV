@@ -484,7 +484,7 @@ async def list_snapshots(
         snapshots = proxmox.nodes(node).qemu(vmid).snapshot.get()
         # 'current' 항목(현재 상태)은 제외
         return [
-            {**s, "is_auto": s.get("name", "").startswith(AUTO_SNAP_PREFIX)}
+            {**s, "is_auto": (s.get("name") or "").startswith(AUTO_SNAP_PREFIX)}
             for s in snapshots
             if s.get("name") != "current"
         ]
@@ -513,7 +513,10 @@ async def create_snapshot(
         real_snaps = [s for s in existing if s.get("name") != "current"]
         if any(s.get("name") == snap_name for s in real_snaps):
             raise HTTPException(status_code=400, detail="이미 존재하는 스냅샷 이름입니다.")
-        manual_snaps = [s for s in real_snaps if not s.get("name", "").startswith(AUTO_SNAP_PREFIX)]
+        manual_snaps = [
+            s for s in real_snaps
+            if not (s.get("name") or "").startswith(AUTO_SNAP_PREFIX)
+        ]
         if manual_snaps and len(manual_snaps) >= 2:
             raise HTTPException(status_code=400, detail="수동 스냅샷은 최대 2개까지 생성할 수 있습니다.")
         if len(real_snaps) >= 3:

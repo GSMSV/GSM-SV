@@ -620,6 +620,33 @@ class TestBestServerRoleFilters:
 
         assert selected.name == project.name
 
+    @patch("services.mon_service.update_server_stats")
+    def test_none_excluded_node_is_ignored(self, mock_update, db, server):
+        mock_update.side_effect = lambda session, selected: selected.last_free_ram_mb
+
+        selected = get_best_server(
+            db,
+            required_ram_mb=2048,
+            excluded_nodes={None},
+        )
+
+        assert selected.name == server.name
+
+    @patch("services.mon_service.update_server_stats")
+    def test_none_only_allowed_nodes_matches_no_server(self, mock_update, db, server):
+        from fastapi import HTTPException
+
+        mock_update.side_effect = lambda session, selected: selected.last_free_ram_mb
+
+        with pytest.raises(HTTPException) as exc_info:
+            get_best_server(
+                db,
+                required_ram_mb=2048,
+                allowed_nodes={None},
+            )
+
+        assert exc_info.value.status_code == 500
+
 
 class TestSnapshotCreation:
     """스냅샷 생성 정책 검증"""
@@ -656,3 +683,33 @@ class TestSnapshotCreation:
         assert exc_info.value.status_code == 400
         assert "이미 존재" in exc_info.value.detail
         qemu.snapshot.post.assert_not_called()
+
+    @pytest.mark.asyncio
+    @patch("api.routes.vmcontrol.get_proxmox_for_server")
+    async def test_none_snapshot_name_does_not_crash(self, mock_proxmox_fn, db, user, server):
+        proxmox = MagicMock()
+        qemu = proxmox.nodes.return_value.qemu.return_value
+        qemu.snapshot.get.return_value = [
+            {"name": "current"},
+            {"name": None},
+        ]
+        qemu.snapshot.post.return_value = "UPID:test"
+        mock_proxmox_fn.return_value = proxmox
+        db.add(Vm(
+            hypervisor_vmid=201,
+            name="test-vm-2",
+            server_id=server.id,
+            owner_id=user.id,
+            internal_ip="10.0.0.101",
+        ))
+        db.commit()
+
+        result = await create_snapshot(
+            node=server.name,
+            vmid=201,
+            body=SnapshotCreateRequest(name="manual-2"),
+            db=db,
+            current_user=user,
+        )
+
+        assert result["success"] is True
