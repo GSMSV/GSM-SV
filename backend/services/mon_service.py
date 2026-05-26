@@ -27,7 +27,9 @@ def update_server_stats(db: Session, server: Server):
         db.commit()
         return free_ram_mb
     except Exception as e:
-        logger.error(f"서버 {server.name} 상태 업데이트 실패: {e}")
+        logger.exception(f"서버 {server.name} 상태 업데이트 실패: {e}")
+        server.last_free_ram_mb = 0
+        db.commit()
         return None
 
 def get_best_server(db: Session, required_ram_mb: int) -> Server:

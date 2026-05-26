@@ -100,6 +100,17 @@ def _allocate_internal_ip(db: Session) -> str:
 SNIPPETS_DIR = "/var/lib/vz/snippets"
 
 
+def _cleanup_vm_db_record(db: Session, vm: Vm) -> None:
+    """조기 커밋된 VM 레코드와 연관 VmPort를 삭제합니다. 실패 시 경고 로깅."""
+    try:
+        db.rollback()
+        db.query(VmPort).filter(VmPort.vm_id == vm.id).delete()
+        db.delete(vm)
+        db.commit()
+    except Exception as err:
+        logger.warning(f"VM {vm.hypervisor_vmid} DB 레코드 정리 실패 (수동 확인 필요): {err}")
+
+
 def _generate_userdata_yaml(password: str, root_password: str = "") -> str:
     """VM별 동적 cloud-init user-data YAML을 생성합니다."""
     return f"""#cloud-config
@@ -344,7 +355,49 @@ def create_vm(
     vmid = _get_next_vmid(proxmox, server.name)
     vm_name, vm_display_name = _generate_vm_name(current_user, tier.value, custom_name=name)
     vm_password = _generate_password()
-    clone_started = False  # clone 시작 여부 추적
+
+    # IP 예약: VM 레코드를 즉시 커밋해 with_for_update() 락을 빠르게 해제합니다.
+    # 커밋 전까지 락을 유지하면 Proxmox 작업(최대 수 분) 동안 다른 VM 생성 요청이
+    # DB 커넥션을 점유한 채 대기하여 커넥션 풀을 고갈시킬 수 있습니다.
+    expires_at = None
+    if current_user.role == UserRole.USER:
+        expires_at = now_kst() + timedelta(days=30)
+
+    new_vm = Vm(
+        hypervisor_vmid=vmid,
+        name=vm_name,
+        display_name=vm_display_name,
+        server_id=server.id,
+        owner_id=current_user.id,
+        allocated_ram_mb=specs["memory"],
+        allocated_cores=specs["cores"],
+        internal_ip=internal_ip,
+        vm_password=vm_password,
+        expires_at=expires_at,
+    )
+    db.add(new_vm)
+    db.flush()  # new_vm.id 확보
+
+    default_ports = calculate_ports(server.base_port, vmid)
+    for internal_port, protocol, description, external_port in [
+        (22,    "tcp",     "SSH",  default_ports["ssh"]),
+        (80,    "tcp",     "HTTP", default_ports["svc1"]),
+        (10000, "tcp/udp", "SVC",  default_ports["svc2"]),
+    ]:
+        db.add(VmPort(
+            vm_id=new_vm.id,
+            internal_port=internal_port,
+            external_port=external_port,
+            protocol=protocol,
+            action="ACCEPT",
+            source="0.0.0.0/0",
+            description=description,
+            is_default=True,
+        ))
+
+    db.commit()  # 즉시 커밋 → with_for_update() 락 해제, IP 예약 완료
+
+    clone_started = False
     iptables_added = False
 
     try:
@@ -418,45 +471,7 @@ def create_vm(
         except Exception:
             logger.warning(f"스니펫 삭제 실패 (무시): {snippet_filename}")
 
-        # 11. DB 저장
-        # 일반 유저 VM은 30일 후 만료
-        expires_at = None
-        if current_user.role == UserRole.USER:
-            expires_at = now_kst() + timedelta(days=30)
-
-        new_vm = Vm(
-            hypervisor_vmid=vmid,
-            name=vm_name,
-            display_name=vm_display_name,
-            server_id=server.id,
-            owner_id=current_user.id,
-            allocated_ram_mb=specs["memory"],
-            allocated_cores=specs["cores"],
-            internal_ip=internal_ip,
-            vm_password=vm_password,
-            expires_at=expires_at,
-        )
-        db.add(new_vm)
-        db.flush()  # new_vm.id 확보
-
-        # 기본 포트 3개를 VmPort로 저장 (방화벽 탭에서 조회/삭제 가능)
-        default_ports = calculate_ports(server.base_port, vmid)
-        for internal_port, protocol, description, external_port in [
-            (22,    "tcp",     "SSH",  default_ports["ssh"]),
-            (80,    "tcp",     "HTTP", default_ports["svc1"]),
-            (10000, "tcp/udp", "SVC",  default_ports["svc2"]),
-        ]:
-            db.add(VmPort(
-                vm_id=new_vm.id,
-                internal_port=internal_port,
-                external_port=external_port,
-                protocol=protocol,
-                action="ACCEPT",
-                source="0.0.0.0/0",
-                description=description,
-                is_default=True,
-            ))
-
+        # 11. 성공 알림 저장
         db.add(Notification(
             user_id=current_user.id,
             type="success",
@@ -477,6 +492,7 @@ def create_vm(
         }
 
     except HTTPException:
+        _cleanup_vm_db_record(db, new_vm)
         raise
     except Exception as e:
         # 실패 시 생성된 VM + 스니펫 정리 시도
@@ -506,7 +522,7 @@ def create_vm(
             _delete_snippet(server, f"user-data-{vmid}.yaml")
         except Exception:
             pass
-        db.rollback()
+        _cleanup_vm_db_record(db, new_vm)
         logger.error(f"VM 생성 실패: {e}")
         raise HTTPException(
             status_code=500,
