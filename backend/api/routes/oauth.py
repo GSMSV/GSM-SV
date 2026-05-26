@@ -246,11 +246,12 @@ async def oauth_callback(
 
     # 7. 임시 코드 발급 → 프론트에서 POST /exchange로 교환
     temp_code = secrets.token_urlsafe(48)
-    _token_store[temp_code] = {
-        "access_token": our_access,
-        "refresh_token": our_refresh,
-        "expires": time.time() + 60,  # 1분 유효
-    }
+    with _store_lock:
+        _token_store[temp_code] = {
+            "access_token": our_access,
+            "refresh_token": our_refresh,
+            "expires": time.time() + 60,  # 1분 유효
+        }
 
     redirect_url = f"{settings.FRONTEND_URL}/auth/callback?code={temp_code}"
     return RedirectResponse(redirect_url)

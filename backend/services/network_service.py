@@ -165,7 +165,8 @@ def manage_iptables(server: Server, vmid: int, vm_ip: str, action: str = "ADD"):
         )
 
         # iptables 백업 (변경 후 자동 저장)
-        _backup_iptables(ssh, server.gateway_ip)
+        if success:
+            _backup_iptables(ssh, server.gateway_ip)
 
         return success
     except Exception as e:
@@ -236,7 +237,8 @@ def manage_custom_iptables(
             timeout=10,
         )
         success = _run_iptables_commands(ssh, commands, rollback_commands)
-        _backup_iptables(ssh, server.gateway_ip)
+        if success:
+            _backup_iptables(ssh, server.gateway_ip)
         return success
     except Exception as e:
         logger.error(f"Gateway SSH 접속 및 커스텀 iptables 설정 실패: {e}")

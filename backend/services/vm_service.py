@@ -341,7 +341,7 @@ def create_vm(
     vm_name, vm_display_name = _generate_vm_name(current_user, tier.value, custom_name=name)
     vm_password = _generate_password()
     clone_started = False  # clone 시작 여부 추적
-    iptables_attempted = False
+    iptables_added = False
 
     try:
         # 5. 템플릿 Full Clone
@@ -395,9 +395,9 @@ def create_vm(
         )
 
         # 8. iptables 포트포워딩 등록
-        iptables_attempted = True
         if not manage_iptables(server, vmid, internal_ip, action="ADD"):
             raise RuntimeError("iptables 포트포워딩 등록에 실패했습니다.")
+        iptables_added = True
 
         # 9. VM 부팅
         proxmox.nodes(server.name).qemu(vmid).status.start.post()
@@ -493,7 +493,7 @@ def create_vm(
                 proxmox.nodes(server.name).qemu(vmid).delete(purge=1)
             except Exception:
                 logger.warning(f"VM {vmid} 생성 실패 후 정리 중 오류 (수동 확인 필요)")
-        if iptables_attempted:
+        if iptables_added:
             try:
                 manage_iptables(server, vmid, internal_ip, action="DELETE")
             except Exception as cleanup_error:
