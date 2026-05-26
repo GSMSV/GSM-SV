@@ -348,11 +348,11 @@ class TestVMNameValidation:
 # ── VM-TC-11: Proxmox 오프라인 시 update_server_stats ─────────
 
 class TestMonServiceFailure:
-    """VM-TC-11: Proxmox 접속 실패 시 DB 값 유지"""
+    """VM-TC-11: Proxmox 접속 실패 시 last_free_ram_mb 0으로 초기화"""
 
     @patch("services.mon_service.get_proxmox_for_server")
-    def test_failure_returns_none_keeps_db_value(self, mock_proxmox, db, server):
-        """Proxmox 실패 시 None 반환, last_free_ram_mb 이전 값 유지"""
+    def test_failure_returns_none_resets_db_value(self, mock_proxmox, db, server):
+        """Proxmox 실패 시 None 반환, last_free_ram_mb 0으로 초기화 (서버 선택 우선순위 제외)"""
         server.last_free_ram_mb = 8000
         db.commit()
 
@@ -360,9 +360,9 @@ class TestMonServiceFailure:
 
         result = update_server_stats(db, server)
         assert result is None
-        # DB 값이 변경되지 않아야 함
+        # 실패한 서버는 0으로 초기화되어 서버 선택에서 배제됨
         db.refresh(server)
-        assert server.last_free_ram_mb == 8000
+        assert server.last_free_ram_mb == 0
 
 
 # ── VM-TC-12: MAX_VMS_PER_USER 한도 초과 ─────────────────────

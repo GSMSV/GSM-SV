@@ -7,7 +7,7 @@ from fastapi import HTTPException
 logger = logging.getLogger(__name__)
 
 # 서버별 Proxmox 연결 캐시 (TTL 5분)
-_proxmox_cache: dict[int, tuple[object, float]] = {}  # server_id → (proxmox, expires_at)
+_connection_cache: dict[int, tuple[object, float]] = {}  # server_id → (proxmox, expires_at)
 _cache_lock = threading.Lock()
 _CACHE_TTL = 300  # 5분
 
@@ -20,7 +20,7 @@ def get_proxmox_for_server(server):
     now = time.time()
 
     with _cache_lock:
-        cached = _proxmox_cache.get(server.id)
+        cached = _connection_cache.get(server.id)
         if cached and cached[1] > now:
             return cached[0]
 
@@ -34,7 +34,7 @@ def get_proxmox_for_server(server):
             timeout=180,
         )
         with _cache_lock:
-            _proxmox_cache[server.id] = (proxmox, now + _CACHE_TTL)
+            _connection_cache[server.id] = (proxmox, now + _CACHE_TTL)
         return proxmox
     except Exception as e:
         logger.error(f"Proxmox 연결 실패 ({server.name}): {e}")

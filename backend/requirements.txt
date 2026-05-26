@@ -14,3 +14,4 @@ slowapi
 paramiko
 cryptography
 pytest
+pytest-asyncio
