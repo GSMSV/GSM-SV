@@ -42,6 +42,19 @@ BACKGROUND_FAST_RETRY_SECONDS = 300
 EXPIRE_LOOP_INTERVAL_SECONDS = 3600
 IPTABLES_BACKUP_INTERVAL_SECONDS = 7 * 24 * 3600
 SNAPSHOT_CREATE_DELAY_SECONDS = 60
+NOTIFY_HOURS = [0, 6, 12, 18]  # KST 기준 어드민 VM 만료 알림 발송 시각
+
+
+def _next_notify_sleep_seconds(now, hours: list) -> float:
+    """now 기준 hours 중 다음 시각까지 초 반환 (KST aware datetime 전용)."""
+    today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    sorted_hours = sorted(hours)
+    for h in sorted_hours:
+        candidate = today.replace(hour=h)
+        if candidate > now:
+            return (candidate - now).total_seconds()
+    first = (today + timedelta(days=1)).replace(hour=sorted_hours[0])
+    return (first - now).total_seconds()
 
 
 def _notify_admins_background_failure(task_name: str, consecutive_failures: int):
@@ -72,6 +85,45 @@ def _notify_admins_background_failure(task_name: str, consecutive_failures: int)
     finally:
         if db:
             db.close()
+
+
+def _send_admin_expiry_notifications(db, now) -> None:
+    """7일 이내 만료 VM 목록을 ADMIN 전체에 알림 1개씩 발송."""
+    soon_vms = (
+        db.query(Vm)
+        .filter(
+            Vm.expires_at.isnot(None),
+            Vm.expires_at > now,
+            Vm.expires_at <= now + timedelta(days=7),
+        )
+        .all()
+    )
+
+    if soon_vms:
+        parts = []
+        for vm in soon_vms:
+            delta = vm.expires_at - now
+            days = delta.days
+            hours = delta.seconds // 3600
+            parts.append(f"{vm.name}({days}일 {hours}시간)")
+        message = f"만료 임박 VM {len(soon_vms)}개: {', '.join(parts)}"
+    else:
+        message = "만료 임박 VM 없음"
+
+    admins = (
+        db.query(User)
+        .filter(User.role == UserRole.ADMIN, User.is_active == True)
+        .all()
+    )
+    for admin in admins:
+        db.add(
+            Notification(
+                user_id=admin.id,
+                type="info",
+                message=message,
+            )
+        )
+    db.commit()
 
 
 # Rate Limiter
@@ -434,6 +486,50 @@ async def _oauth_store_cleanup_loop():
         await asyncio.sleep(BACKGROUND_FAST_RETRY_SECONDS)  # 5분마다
 
 
+async def _admin_expiry_notify_loop():
+    """KST 06:00·12:00·18:00·00:00 마다 7일 이내 만료 VM 어드민 알림."""
+    consecutive_failures = 0
+    while True:
+        db = None
+        try:
+            if consecutive_failures == 0:
+                now = now_kst()
+                wait = _next_notify_sleep_seconds(now, NOTIFY_HOURS)
+                await asyncio.sleep(wait)
+
+            db = SessionLocal()
+            now = now_kst()
+            _send_admin_expiry_notifications(db, now)
+            logger.info("[expiry-notify] 어드민 VM 만료 임박 알림 발송 완료")
+            consecutive_failures = 0
+        except Exception as e:
+            if db:
+                db.rollback()
+            consecutive_failures += 1
+            logger.exception(
+                f"[expiry-notify] 백그라운드 태스크 오류 ({consecutive_failures}회 연속): {e}"
+            )
+            if consecutive_failures >= BACKGROUND_FAILURE_NOTIFY_THRESHOLD:
+                logger.critical(
+                    f"[expiry-notify] 연속 {consecutive_failures}회 실패 — 점검 필요"
+                )
+            if consecutive_failures == BACKGROUND_FAILURE_NOTIFY_THRESHOLD:
+                try:
+                    await asyncio.to_thread(
+                        _notify_admins_background_failure,
+                        "expiry-notify",
+                        consecutive_failures,
+                    )
+                except Exception as notify_err:
+                    logger.exception(f"[expiry-notify] 관리자 알림 발송 실패: {notify_err}")
+        finally:
+            if db:
+                db.close()
+
+        if consecutive_failures > 0:
+            await asyncio.sleep(BACKGROUND_FAST_RETRY_SECONDS)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # ── 시작 시 ──
@@ -454,6 +550,8 @@ async def lifespan(app: FastAPI):
     snapshot_task = asyncio.create_task(_daily_snapshot_loop())
     # OAuth PKCE/토큰 스토어 주기적 정리 (5분 간격)
     oauth_cleanup_task = asyncio.create_task(_oauth_store_cleanup_loop())
+    # 어드민 VM 만료 임박 알림 (KST 06/12/18/00시)
+    expiry_notify_task = asyncio.create_task(_admin_expiry_notify_loop())
 
     yield
     # ── 종료 시 ──
@@ -461,6 +559,7 @@ async def lifespan(app: FastAPI):
     iptables_task.cancel()
     snapshot_task.cancel()
     oauth_cleanup_task.cancel()
+    expiry_notify_task.cancel()
     await serverless._http_client.aclose()
 
 
