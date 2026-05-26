@@ -1,4 +1,5 @@
-from pydantic import BaseModel, Field
+import re
+from pydantic import BaseModel, Field, field_validator
 from typing import Optional
 from enum import Enum
 
@@ -53,3 +54,16 @@ class VMCreate(BaseModel):
     custom_cores: Optional[int] = None  # vCPU 수 (1~8)
     custom_memory: Optional[int] = None  # RAM (MB 단위, 1024~32768)
     custom_disk: Optional[int] = None  # 디스크 (GB 단위, 30~70)
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, v):
+        if v is None:
+            return v
+        if len(v) > 40:
+            raise ValueError("VM 이름은 40자 이하여야 합니다.")
+        if not re.match(r"^[a-zA-Z0-9][a-zA-Z0-9_-]*$", v):
+            raise ValueError(
+                "VM 이름은 영문·숫자로 시작하고 영문·숫자·하이픈·언더스코어만 허용합니다."
+            )
+        return v
