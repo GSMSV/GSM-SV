@@ -153,15 +153,25 @@ async def add_custom_port(
 
     # iptables DNAT 추가 — 실패 시 DB 레코드 삭제
     if vm.internal_ip:
-        success = manage_custom_iptables(
-            server=server,
-            vm_ip=vm.internal_ip,
-            internal_port=body.internal_port,
-            external_port=external_port,
-            protocol=body.protocol,
-            action="ADD",
-            source_ip=body.source,
-        )
+        try:
+            success = manage_custom_iptables(
+                server=server,
+                vm_ip=vm.internal_ip,
+                internal_port=body.internal_port,
+                external_port=external_port,
+                protocol=body.protocol,
+                action="ADD",
+                source_ip=body.source,
+            )
+        except ValueError as e:
+            db.delete(vm_port)
+            db.commit()
+            raise HTTPException(status_code=400, detail=str(e))
+        except Exception as e:
+            db.delete(vm_port)
+            db.commit()
+            logger.error(f"[firewall] Gateway iptables 설정 중 예외 발생: {e}")
+            raise HTTPException(status_code=502, detail="Gateway 방화벽 규칙 설정에 실패했습니다.")
         if not success:
             db.delete(vm_port)
             db.commit()
@@ -255,19 +265,23 @@ async def delete_custom_port(
     # iptables 규칙 삭제 ("tcp/udp" 프로토콜은 두 번 호출)
     # 실패해도 DB 레코드는 삭제 — 삭제 실패 시 영구적으로 못 지우는 것이 더 위험
     if vm.internal_ip:
-        # ADD 시 source_ip와 동일한 값으로 DELETE — "0.0.0.0/0"은 플래그 없이 추가된 것이므로 None 처리
-        source_ip = vm_port.source if vm_port.source and vm_port.source != "0.0.0.0/0" else None
+        # source 정규화는 manage_custom_iptables 내부에서 처리합니다.
+        source_ip = vm_port.source
         protocols = ["tcp", "udp"] if vm_port.protocol == "tcp/udp" else [vm_port.protocol]
         for proto in protocols:
-            success = manage_custom_iptables(
-                server=server,
-                vm_ip=vm.internal_ip,
-                internal_port=vm_port.internal_port,
-                external_port=vm_port.external_port,
-                protocol=proto,
-                action="DELETE",
-                source_ip=source_ip,
-            )
+            try:
+                success = manage_custom_iptables(
+                    server=server,
+                    vm_ip=vm.internal_ip,
+                    internal_port=vm_port.internal_port,
+                    external_port=vm_port.external_port,
+                    protocol=proto,
+                    action="DELETE",
+                    source_ip=source_ip,
+                )
+            except Exception as e:
+                success = False
+                logger.error(f"[firewall] Gateway iptables 삭제 예외 — port {vm_port.external_port} ({proto}): {e}")
             if not success:
                 logger.error(f"[firewall] Gateway iptables 삭제 실패 — port {vm_port.external_port} ({proto}), DB 레코드는 삭제 진행")
 

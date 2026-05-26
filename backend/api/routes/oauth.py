@@ -9,6 +9,7 @@ import secrets
 import time
 import httpx
 import logging
+import threading
 from urllib.parse import urlencode
 
 from fastapi import APIRouter, HTTPException, Query, Depends, Request
@@ -30,6 +31,7 @@ router = APIRouter()
 # 임시 저장소 (프로덕션에서는 Redis 사용 권장)
 _pkce_store: dict[str, tuple[str, float]] = {}  # state → (code_verifier, expires_at)
 _token_store: dict[str, dict] = {}  # temp_code → {access, refresh, expires}
+_store_lock = threading.RLock()
 _STORE_TTL = 300  # 5분
 
 
@@ -45,15 +47,16 @@ def validate_oauth_store_mode():
 
 def _cleanup_stores():
     """만료된 항목 정리"""
-    now = time.time()
-    expired_pkce = [
-        k for k, v in _pkce_store.items() if isinstance(v, tuple) and v[1] < now
-    ]
-    for k in expired_pkce:
-        _pkce_store.pop(k, None)
-    expired_tokens = [k for k, v in _token_store.items() if v.get("expires", 0) < now]
-    for k in expired_tokens:
-        _token_store.pop(k, None)
+    with _store_lock:
+        now = time.time()
+        expired_pkce = [
+            k for k, v in _pkce_store.items() if isinstance(v, tuple) and v[1] < now
+        ]
+        for k in expired_pkce:
+            _pkce_store.pop(k, None)
+        expired_tokens = [k for k, v in _token_store.items() if v.get("expires", 0) < now]
+        for k in expired_tokens:
+            _token_store.pop(k, None)
 
 
 def _generate_pkce() -> tuple[str, str]:
@@ -76,11 +79,12 @@ async def oauth_authorize(request: Request):
 
     # state → (verifier, 만료시간) 저장
     _cleanup_stores()
-    if len(_pkce_store) > 1000:
-        raise HTTPException(
-            status_code=503, detail="서버가 바쁩니다. 잠시 후 다시 시도해주세요."
-        )
-    _pkce_store[state] = (verifier, time.time() + _STORE_TTL)
+    with _store_lock:
+        if len(_pkce_store) > 1000:
+            raise HTTPException(
+                status_code=503, detail="서버가 바쁩니다. 잠시 후 다시 시도해주세요."
+            )
+        _pkce_store[state] = (verifier, time.time() + _STORE_TTL)
 
     params = {
         "client_id": settings.DATAGSM_CLIENT_ID,
@@ -103,7 +107,8 @@ async def oauth_callback(
     """DataGSM 콜백 — code로 토큰 교환 → userinfo 조회 → 우리 JWT 발급"""
 
     # 1. PKCE verifier 꺼내기
-    entry = _pkce_store.pop(state, None)
+    with _store_lock:
+        entry = _pkce_store.pop(state, None)
     if not entry or (isinstance(entry, tuple) and entry[1] < time.time()):
         raise HTTPException(
             status_code=400,
@@ -181,17 +186,20 @@ async def oauth_callback(
     if not email:
         raise HTTPException(status_code=400, detail="이메일 정보를 가져올 수 없습니다.")
 
-    # 5. 기존 유저 매칭 (이메일 기준)
-    # 복합 유니크 제약(email, role)으로 동일 이메일에 여러 역할 계정이 존재할 수 있으므로
-    # 관리자/오너 계정 존재 여부를 먼저 명시적으로 차단
-    if db.query(User).filter(User.email == email, User.role != UserRole.USER).first():
+    # 5. 기존 유저 매칭 (OAuth는 일반 USER 계정으로만 로그인)
+    # 동일 이메일의 PROJECT_OWNER 계정은 별도 계정으로 공존할 수 있습니다.
+    user = (
+        db.query(User).filter(User.email == email, User.role == UserRole.USER).first()
+    )
+
+    if db.query(User).filter(
+        User.email == email,
+        User.role == UserRole.ADMIN,
+    ).first():
         raise HTTPException(
             status_code=409,
             detail="해당 이메일은 다른 권한 계정으로 이미 존재합니다.",
         )
-    user = (
-        db.query(User).filter(User.email == email, User.role == UserRole.USER).first()
-    )
 
     if user:
         # 기존 계정에 OAuth 연결
@@ -238,11 +246,12 @@ async def oauth_callback(
 
     # 7. 임시 코드 발급 → 프론트에서 POST /exchange로 교환
     temp_code = secrets.token_urlsafe(48)
-    _token_store[temp_code] = {
-        "access_token": our_access,
-        "refresh_token": our_refresh,
-        "expires": time.time() + 60,  # 1분 유효
-    }
+    with _store_lock:
+        _token_store[temp_code] = {
+            "access_token": our_access,
+            "refresh_token": our_refresh,
+            "expires": time.time() + 60,  # 1분 유효
+        }
 
     redirect_url = f"{settings.FRONTEND_URL}/auth/callback?code={temp_code}"
     return RedirectResponse(redirect_url)
@@ -255,7 +264,8 @@ class TokenExchangeRequest(BaseModel):
 @router.post("/exchange")
 async def exchange_temp_code(body: TokenExchangeRequest):
     """임시 코드를 JWT 토큰으로 교환 (1회용) — httpOnly 쿠키에 설정"""
-    entry = _token_store.pop(body.code, None)
+    with _store_lock:
+        entry = _token_store.pop(body.code, None)
     if not entry or entry["expires"] < time.time():
         raise HTTPException(
             status_code=400, detail="유효하지 않거나 만료된 코드입니다."
