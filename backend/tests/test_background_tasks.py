@@ -1,14 +1,17 @@
 """_notify_admins_background_failure 단위 테스트."""
 
 import pytest
+from datetime import datetime, timezone, timedelta
 from unittest.mock import patch
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from core.database import Base
 from core.security import get_password_hash
-from models.user import User, UserRole
 from models.notification import Notification
+from models.server import Server
+from models.user import User, UserRole
+from models.vm import Vm
 
 TEST_DB_URL = "sqlite:///./test_background_tasks.db"
 engine = create_engine(TEST_DB_URL, connect_args={"check_same_thread": False})
@@ -114,8 +117,6 @@ class TestNotifyAdminsBackgroundFailure:
         assert db.query(Notification).count() == 0
 
 
-from datetime import datetime, timezone, timedelta
-
 KST = timezone(timedelta(hours=9))
 
 
@@ -145,10 +146,6 @@ class TestNextNotifySleepSeconds:
         now = self._now(6, 0)
         secs = _next_notify_sleep_seconds(now, [0, 6, 12, 18])
         assert secs == 6 * 3600
-
-
-from models.vm import Vm
-from models.server import Server
 
 
 def _make_server(db):
