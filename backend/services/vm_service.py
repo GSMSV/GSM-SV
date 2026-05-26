@@ -270,13 +270,11 @@ def create_vm(
         raise HTTPException(status_code=403, detail="프로젝트 커스텀 티어는 프로젝트 오너만 사용할 수 있습니다.")
 
     # 역할 기반 노드 접근 제어 (ADMIN은 모든 노드 허용)
-    if node_name and current_user.role == UserRole.USER:
-        project_node = settings.PROJECT_NODE_NAME
-        if node_name == project_node:
-            raise HTTPException(
-                status_code=403,
-                detail="일반 사용자는 프로젝트 전용 노드에 VM을 생성할 수 없습니다.",
-            )
+    if current_user.role == UserRole.USER and node_name == settings.PROJECT_NODE_NAME:
+        raise HTTPException(
+            status_code=403,
+            detail="일반 사용자는 프로젝트 전용 노드에 VM을 생성할 수 없습니다.",
+        )
 
     specs = TIER_SPECS.get(tier)
     if not specs:
