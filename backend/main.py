@@ -116,7 +116,25 @@ def _send_admin_expiry_notifications(db, now) -> None:
         .filter(User.role == UserRole.ADMIN, User.is_active == True)
         .all()
     )
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    admin_ids = [admin.id for admin in admins]
+    existing_user_ids = set()
+    if admin_ids:
+        existing_user_ids = {
+            row[0]
+            for row in db.query(Notification.user_id)
+            .filter(
+                Notification.user_id.in_(admin_ids),
+                Notification.type == "info",
+                Notification.message.like("만료 임박 VM%"),
+                Notification.created_at >= today_start,
+            )
+            .all()
+        }
+
     for admin in admins:
+        if admin.id in existing_user_ids:
+            continue
         db.add(
             Notification(
                 user_id=admin.id,

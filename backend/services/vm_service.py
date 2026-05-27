@@ -24,6 +24,7 @@ from models.vm_port import VmPort
 logger = logging.getLogger(__name__)
 
 _IP_ALLOCATION_LOCK_KEY = 0x47534D53
+_FALLBACK_LOCK_TIMEOUT_SECONDS = 10.0
 _fallback_ip_allocation_lock = threading.Lock()
 _FALLBACK_LOCK_INFO_KEY = "internal_ip_allocation_lock_held"
 
@@ -96,7 +97,11 @@ def _acquire_internal_ip_allocation_lock(db: Session) -> None:
     if db.info.get(_FALLBACK_LOCK_INFO_KEY):
         return
 
-    _fallback_ip_allocation_lock.acquire()
+    if not _fallback_ip_allocation_lock.acquire(timeout=_FALLBACK_LOCK_TIMEOUT_SECONDS):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="IP 할당 중 동시성 제어 락 획득에 실패했습니다. 잠시 후 다시 시도해주세요.",
+        )
     db.info[_FALLBACK_LOCK_INFO_KEY] = _fallback_ip_allocation_lock
     event.listen(db, "after_commit", _release_fallback_ip_allocation_lock, once=True)
     event.listen(db, "after_rollback", _release_fallback_ip_allocation_lock, once=True)
