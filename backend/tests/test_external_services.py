@@ -399,6 +399,46 @@ class TestProxmoxExceptionMapping:
 class TestNotificationsReadAll:
     """EXT-TC-06: read-all은 삭제가 아닌 is_read=True 설정"""
 
+    def test_read_all_endpoint_marks_as_read_not_delete(self, db, user):
+        """POST /read-all은 알림을 삭제하지 않고 읽음 처리"""
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from api.dependencies import get_current_user
+        from api.routes import notifications
+        from core.database import get_db
+
+        for i in range(2):
+            db.add(
+                Notification(
+                    user_id=user.id,
+                    type="info",
+                    message=f"만료 임박 알림 {i}",
+                    is_read=False,
+                )
+            )
+        db.commit()
+
+        app = FastAPI()
+        app.include_router(notifications.router, prefix="/api/v1/notifications")
+
+        def override_db():
+            yield db
+
+        app.dependency_overrides[get_db] = override_db
+        app.dependency_overrides[get_current_user] = lambda: user
+
+        with TestClient(app) as client:
+            response = client.post("/api/v1/notifications/read-all")
+
+        assert response.status_code == 200
+        assert response.json() == {"success": True}
+
+        all_notifs = (
+            db.query(Notification).filter(Notification.user_id == user.id).all()
+        )
+        assert len(all_notifs) == 2
+        assert all(n.is_read for n in all_notifs)
+
     def test_read_all_marks_as_read_not_delete(self, db, user):
         """미읽음 5개 → read-all → 5개 모두 is_read=True, 삭제 아님"""
         for i in range(5):
