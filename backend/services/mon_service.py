@@ -59,6 +59,8 @@ def get_best_server(
     active_servers = query.all()
     
     if not active_servers:
+        if allowed_nodes is not None:
+            raise HTTPException(status_code=503, detail="요청 가능한 활성 서버가 없습니다.")
         raise HTTPException(status_code=500, detail="사용 가능한 활성 서버가 없습니다.")
     
     # 2. (옵션) 실시간에 가깝게 하기 위해 할당 전 모든 서버의 RAM 상태를 1회 갱신 (트래픽이 적을 때 유효)

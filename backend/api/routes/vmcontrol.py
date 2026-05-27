@@ -21,6 +21,13 @@ from slowapi.util import get_remote_address
 limiter = Limiter(key_func=get_remote_address)
 logger = logging.getLogger(__name__)
 router = APIRouter()
+_snapshot_create_locks: dict[tuple[str, int], asyncio.Lock] = {}
+_snapshot_create_locks_guard = asyncio.Lock()
+
+
+async def _get_snapshot_create_lock(node: str, vmid: int) -> asyncio.Lock:
+    async with _snapshot_create_locks_guard:
+        return _snapshot_create_locks.setdefault((node, vmid), asyncio.Lock())
 
 
 @router.get("/nodes")
@@ -509,24 +516,26 @@ async def create_snapshot(
     snap_name = body.name
 
     try:
-        existing = proxmox.nodes(node).qemu(vmid).snapshot.get()
-        real_snaps = [s for s in existing if s.get("name") != "current"]
-        if any(s.get("name") == snap_name for s in real_snaps):
-            raise HTTPException(status_code=400, detail="이미 존재하는 스냅샷 이름입니다.")
-        manual_snaps = [
-            s for s in real_snaps
-            if not (s.get("name") or "").startswith(AUTO_SNAP_PREFIX)
-        ]
-        if manual_snaps and len(manual_snaps) >= 2:
-            raise HTTPException(status_code=400, detail="수동 스냅샷은 최대 2개까지 생성할 수 있습니다.")
-        if len(real_snaps) >= 3:
-            raise HTTPException(status_code=400, detail="스냅샷은 최대 3개까지 생성할 수 있습니다.")
+        lock = await _get_snapshot_create_lock(node, vmid)
+        async with lock:
+            existing = proxmox.nodes(node).qemu(vmid).snapshot.get()
+            real_snaps = [s for s in existing if s.get("name") != "current"]
+            if any(s.get("name") == snap_name for s in real_snaps):
+                raise HTTPException(status_code=400, detail="이미 존재하는 스냅샷 이름입니다.")
+            manual_snaps = [
+                s for s in real_snaps
+                if not (s.get("name") or "").startswith(AUTO_SNAP_PREFIX)
+            ]
+            if manual_snaps and len(manual_snaps) >= 2:
+                raise HTTPException(status_code=400, detail="수동 스냅샷은 최대 2개까지 생성할 수 있습니다.")
+            if len(real_snaps) >= 3:
+                raise HTTPException(status_code=400, detail="스냅샷은 최대 3개까지 생성할 수 있습니다.")
 
-        result = proxmox.nodes(node).qemu(vmid).snapshot.post(
-            snapname=snap_name,
-            description=body.description or "",
-            vmstate=0,  # RAM 상태 저장 안 함 (디스크만)
-        )
+            result = proxmox.nodes(node).qemu(vmid).snapshot.post(
+                snapname=snap_name,
+                description=body.description or "",
+                vmstate=0,  # RAM 상태 저장 안 함 (디스크만)
+            )
         return {"success": True, "message": f"스냅샷 '{snap_name}'이(가) 생성되었습니다.", "task": result}
     except HTTPException:
         raise

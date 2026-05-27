@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import time
 from datetime import timedelta
 from pathlib import Path
@@ -48,6 +49,7 @@ from slowapi import Limiter
 from slowapi.util import get_remote_address
 
 limiter = Limiter(key_func=get_remote_address)
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -769,7 +771,11 @@ async def request_password_reset(
 
     sent = await send_verification_email(body.email, code)
     if not sent:
-        raise HTTPException(status_code=500, detail="인증 이메일 발송에 실패했습니다.")
+        logger.warning("[password-reset] 인증 이메일 발송 실패: %s", body.email)
+        db.delete(verification)
+        db.commit()
+        await _pad_password_reset_response(started_at)
+        return _password_reset_request_response(body.email)
 
     await _pad_password_reset_response(started_at)
     return _password_reset_request_response(body.email)

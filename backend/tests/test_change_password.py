@@ -415,6 +415,29 @@ class TestChangePassword:
         )
         assert records == []
 
+    def test_password_reset_request_smtp_failure_silently_succeeds_without_record(self, client, db):
+        """SMTP 실패도 계정 존재 여부를 노출하지 않고 재설정 레코드를 남기지 않는다."""
+        from models.email_verification import EmailVerification
+        from unittest.mock import patch
+
+        _make_user(db, email="smtp-fail@gsm.hs.kr")
+
+        with patch("api.routes.auth.send_verification_email", return_value=False), \
+             patch("api.routes.auth._PASSWORD_RESET_MIN_RESPONSE_SECONDS", 0):
+            res = client.post(
+                "/api/v1/auth/password-reset/request",
+                json={"email": "smtp-fail@gsm.hs.kr", "login_role": "user"},
+            )
+
+        assert res.status_code == 200, res.text
+        assert res.json()["email"] == "smtp-fail@gsm.hs.kr"
+        records = (
+            db.query(EmailVerification)
+            .filter(EmailVerification.email == "smtp-fail@gsm.hs.kr")
+            .all()
+        )
+        assert records == []
+
     def test_login_with_new_password_after_change(self, client, db):
         """변경 → 새 비밀번호 로그인 성공, 옛 비밀번호 로그인 실패."""
         user = _make_user(db, email="login@gsm.hs.kr", password="OldPass1!")

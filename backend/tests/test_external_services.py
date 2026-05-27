@@ -333,6 +333,38 @@ class TestProxmoxConnectionCache:
             _connection_cache.pop(999, None)
 
 
+class TestProxmoxExceptionMapping:
+    """Proxmox 예외를 HTTP 상태로 변환하는 정책 검증"""
+
+    def test_resource_exception_403_maps_to_403(self, monkeypatch):
+        import services.proxmox_client as proxmox_client
+
+        class FakeResourceException(Exception):
+            status_code = 403
+            content = "permission denied"
+            errors = None
+
+        monkeypatch.setattr(proxmox_client, "ResourceException", FakeResourceException)
+
+        http_exc = proxmox_client.proxmox_http_exception(FakeResourceException())
+
+        assert http_exc.status_code == 403
+
+    def test_resource_word_alone_does_not_map_to_507(self, monkeypatch):
+        import services.proxmox_client as proxmox_client
+
+        class FakeResourceException(Exception):
+            status_code = 400
+            content = "resource does not exist"
+            errors = None
+
+        monkeypatch.setattr(proxmox_client, "ResourceException", FakeResourceException)
+
+        http_exc = proxmox_client.proxmox_http_exception(FakeResourceException())
+
+        assert http_exc.status_code == 500
+
+
 # ── EXT-TC-06: /notifications/read-all — 삭제가 아닌 읽음 처리 ─
 
 

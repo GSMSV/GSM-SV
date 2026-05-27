@@ -360,11 +360,17 @@ def create_vm(
                 required_ram_mb=specs["memory"],
                 excluded_nodes={project_node},
             )
-        elif current_user.role == UserRole.PROJECT_OWNER:
+        elif current_user.role == UserRole.PROJECT_OWNER or tier == VMTierEnum.PROJECT_CUSTOM:
             server = get_best_server(
                 db,
                 required_ram_mb=specs["memory"],
                 allowed_nodes={project_node},
+            )
+        elif current_user.role == UserRole.ADMIN:
+            server = get_best_server(
+                db,
+                required_ram_mb=specs["memory"],
+                excluded_nodes={project_node},
             )
         else:
             server = get_best_server(db, required_ram_mb=specs["memory"])

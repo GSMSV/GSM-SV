@@ -36,15 +36,17 @@ def proxmox_http_exception(
 
     if isinstance(exc, ResourceException):
         content = f"{exc.content} {exc.errors or ''}".lower()
-        if exc.status_code in (401, 403):
+        if exc.status_code == 401:
             return HTTPException(status_code=401, detail="Proxmox 인증에 실패했습니다.")
+        if exc.status_code == 403:
+            return HTTPException(status_code=403, detail="Proxmox 작업 권한이 없습니다.")
         if exc.status_code == 404:
             return HTTPException(status_code=404, detail="Proxmox 리소스를 찾을 수 없습니다.")
         if exc.status_code == 409:
             return HTTPException(status_code=409, detail="Proxmox 리소스가 현재 작업 중입니다.")
         if exc.status_code == 507 or any(
             marker in content
-            for marker in ("insufficient", "not enough", "no space", "resource")
+            for marker in ("insufficient", "not enough", "no space")
         ):
             return HTTPException(status_code=507, detail="Proxmox 노드의 리소스가 부족합니다.")
         if exc.status_code >= 500:
