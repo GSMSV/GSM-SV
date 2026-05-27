@@ -245,3 +245,23 @@ class TestSendAdminExpiryNotifications:
 
         db.expire_all()
         assert db.query(Notification).count() == 2
+
+    def test_duplicate_same_day_notification_skipped(self, db):
+        """같은 날 이미 만료 임박 알림을 받은 ADMIN에게 중복 발송하지 않는다."""
+        from main import _send_admin_expiry_notifications
+        now = datetime(2026, 5, 26, 12, 0, 0)
+        server = _make_server(db)
+        admin = _make_admin(db, "dup-admin@gsm.hs.kr")
+        _make_vm(db, "vm-soon", server, now + timedelta(days=3))
+        db.add(Notification(
+            user_id=admin.id,
+            type="info",
+            message="만료 임박 VM 1개: old-vm(1일 0시간)",
+            created_at=now.replace(hour=1),
+        ))
+        db.commit()
+
+        _send_admin_expiry_notifications(db, now)
+
+        db.expire_all()
+        assert db.query(Notification).filter(Notification.user_id == admin.id).count() == 1

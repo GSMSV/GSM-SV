@@ -366,6 +366,34 @@ class TestMonServiceFailure:
         db.refresh(server)
         assert server.last_free_ram_mb == 0
 
+    @patch("services.mon_service.get_proxmox_for_server")
+    def test_failure_reset_db_error_is_swallowed(self, mock_proxmox, db, server):
+        """상태 초기화 commit 실패도 update_server_stats 밖으로 전파하지 않는다."""
+        mock_proxmox.side_effect = Exception("connection refused")
+
+        with patch.object(db, "commit", side_effect=Exception("db down")):
+            result = update_server_stats(db, server)
+
+        assert result is None
+
+
+class TestFallbackIpAllocationLock:
+    """비-PostgreSQL fallback IP 할당 락 동작 검증"""
+
+    def test_fallback_lock_timeout_returns_503(self, db):
+        from fastapi import HTTPException
+        import services.vm_service as vm_service
+
+        acquired = vm_service._fallback_ip_allocation_lock.acquire(blocking=False)
+        assert acquired
+        try:
+            with patch("services.vm_service._FALLBACK_LOCK_TIMEOUT_SECONDS", 0.01):
+                with pytest.raises(HTTPException) as exc_info:
+                    vm_service._acquire_internal_ip_allocation_lock(db)
+            assert exc_info.value.status_code == 503
+        finally:
+            vm_service._fallback_ip_allocation_lock.release()
+
 
 # ── VM-TC-12: MAX_VMS_PER_USER 한도 초과 ─────────────────────
 
