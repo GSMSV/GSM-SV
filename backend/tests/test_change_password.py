@@ -415,8 +415,8 @@ class TestChangePassword:
         )
         assert records == []
 
-    def test_password_reset_request_smtp_failure_silently_succeeds_without_record(self, client, db):
-        """SMTP 실패도 계정 존재 여부를 노출하지 않고 재설정 레코드를 남기지 않는다."""
+    def test_password_reset_request_smtp_failure_returns_503_without_record(self, client, db):
+        """SMTP 실패 시 사용자가 재시도할 수 있도록 503을 반환하고 재설정 레코드를 남기지 않는다."""
         from models.email_verification import EmailVerification
         from unittest.mock import patch
 
@@ -429,14 +429,29 @@ class TestChangePassword:
                 json={"email": "smtp-fail@gsm.hs.kr", "login_role": "user"},
             )
 
-        assert res.status_code == 200, res.text
-        assert res.json()["email"] == "smtp-fail@gsm.hs.kr"
+        assert res.status_code == 503, res.text
         records = (
             db.query(EmailVerification)
             .filter(EmailVerification.email == "smtp-fail@gsm.hs.kr")
             .all()
         )
         assert records == []
+
+    def test_password_reset_request_db_failure_returns_503(self, client, db):
+        """비밀번호 재설정 DB 처리 실패는 500 traceback 대신 503으로 응답한다."""
+        from sqlalchemy.exc import SQLAlchemyError
+        from unittest.mock import patch
+
+        _make_user(db, email="db-fail@gsm.hs.kr")
+
+        with patch.object(db, "commit", side_effect=SQLAlchemyError("db down")), \
+             patch("api.routes.auth._PASSWORD_RESET_MIN_RESPONSE_SECONDS", 0):
+            res = client.post(
+                "/api/v1/auth/password-reset/request",
+                json={"email": "db-fail@gsm.hs.kr", "login_role": "user"},
+            )
+
+        assert res.status_code == 503, res.text
 
     def test_login_with_new_password_after_change(self, client, db):
         """변경 → 새 비밀번호 로그인 성공, 옛 비밀번호 로그인 실패."""

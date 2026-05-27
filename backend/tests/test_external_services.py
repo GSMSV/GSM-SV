@@ -362,7 +362,35 @@ class TestProxmoxExceptionMapping:
 
         http_exc = proxmox_client.proxmox_http_exception(FakeResourceException())
 
-        assert http_exc.status_code == 500
+        assert http_exc.status_code == 400
+
+    def test_resource_exception_400_maps_to_400(self, monkeypatch):
+        import services.proxmox_client as proxmox_client
+
+        class FakeResourceException(Exception):
+            status_code = 400
+            content = "parameter verification failed"
+            errors = None
+
+        monkeypatch.setattr(proxmox_client, "ResourceException", FakeResourceException)
+
+        http_exc = proxmox_client.proxmox_http_exception(FakeResourceException())
+
+        assert http_exc.status_code == 400
+
+    def test_resource_exception_429_maps_to_429(self, monkeypatch):
+        import services.proxmox_client as proxmox_client
+
+        class FakeResourceException(Exception):
+            status_code = 429
+            content = "too many requests"
+            errors = None
+
+        monkeypatch.setattr(proxmox_client, "ResourceException", FakeResourceException)
+
+        http_exc = proxmox_client.proxmox_http_exception(FakeResourceException())
+
+        assert http_exc.status_code == 429
 
 
 # ── EXT-TC-06: /notifications/read-all — 삭제가 아닌 읽음 처리 ─

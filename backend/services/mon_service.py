@@ -59,7 +59,7 @@ def get_best_server(
     active_servers = query.all()
     
     if not active_servers:
-        if allowed_nodes is not None:
+        if allowed_nodes is not None or excluded_nodes is not None:
             raise HTTPException(status_code=503, detail="요청 가능한 활성 서버가 없습니다.")
         raise HTTPException(status_code=500, detail="사용 가능한 활성 서버가 없습니다.")
     

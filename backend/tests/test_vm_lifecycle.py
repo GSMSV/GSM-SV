@@ -647,6 +647,21 @@ class TestBestServerRoleFilters:
 
         assert exc_info.value.status_code == 503
 
+    @patch("services.mon_service.update_server_stats")
+    def test_excluded_nodes_filter_matching_all_servers_returns_503(self, mock_update, db, server):
+        from fastapi import HTTPException
+
+        mock_update.side_effect = lambda session, selected: selected.last_free_ram_mb
+
+        with pytest.raises(HTTPException) as exc_info:
+            get_best_server(
+                db,
+                required_ram_mb=2048,
+                excluded_nodes={server.name},
+            )
+
+        assert exc_info.value.status_code == 503
+
     @patch("services.vm_service.settings")
     @patch("services.mon_service.get_best_server")
     def test_admin_basic_auto_assignment_excludes_project_node(

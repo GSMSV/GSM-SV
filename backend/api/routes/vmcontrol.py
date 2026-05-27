@@ -1,10 +1,13 @@
 import asyncio
 import base64
+import hashlib
 import logging
+from contextlib import asynccontextmanager
 from typing import Any
 from datetime import timedelta
 from core.timezone import now_kst
 from fastapi import APIRouter, HTTPException, status, Depends, Request
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 from schemas.vm_schema import VMAction, VMCreate, VMResize, SnapshotCreateRequest
 from core.constants import AUTO_SNAP_PREFIX, PROVISIONING_UPTIME_THRESHOLD_SECONDS
@@ -28,6 +31,26 @@ _snapshot_create_locks_guard = asyncio.Lock()
 async def _get_snapshot_create_lock(node: str, vmid: int) -> asyncio.Lock:
     async with _snapshot_create_locks_guard:
         return _snapshot_create_locks.setdefault((node, vmid), asyncio.Lock())
+
+
+def _snapshot_advisory_lock_key(node: str, vmid: int) -> int:
+    digest = hashlib.blake2b(f"{node}:{vmid}".encode(), digest_size=8).digest()
+    return int.from_bytes(digest, "big", signed=True)
+
+
+@asynccontextmanager
+async def _snapshot_create_guard(db: Session, node: str, vmid: int):
+    if db.get_bind().dialect.name == "postgresql":
+        db.execute(
+            text("SELECT pg_advisory_xact_lock(:lock_key)"),
+            {"lock_key": _snapshot_advisory_lock_key(node, vmid)},
+        )
+        yield
+        return
+
+    lock = await _get_snapshot_create_lock(node, vmid)
+    async with lock:
+        yield
 
 
 @router.get("/nodes")
@@ -516,8 +539,7 @@ async def create_snapshot(
     snap_name = body.name
 
     try:
-        lock = await _get_snapshot_create_lock(node, vmid)
-        async with lock:
+        async with _snapshot_create_guard(db, node, vmid):
             existing = proxmox.nodes(node).qemu(vmid).snapshot.get()
             real_snaps = [s for s in existing if s.get("name") != "current"]
             if any(s.get("name") == snap_name for s in real_snaps):
