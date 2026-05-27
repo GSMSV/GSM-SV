@@ -1,4 +1,6 @@
+import asyncio
 import json
+import logging
 import time
 from datetime import timedelta
 from pathlib import Path
@@ -13,7 +15,7 @@ from fastapi import (
     UploadFile,
     File,
 )
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from fastapi.responses import JSONResponse
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
@@ -47,6 +49,7 @@ from slowapi import Limiter
 from slowapi.util import get_remote_address
 
 limiter = Limiter(key_func=get_remote_address)
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -689,6 +692,17 @@ async def read_users_me(current_user: User = Depends(get_current_user)):
 
 
 _RESET_ROLE_MAP = {"user": UserRole.USER, "project_owner": UserRole.PROJECT_OWNER}
+_PASSWORD_RESET_MIN_RESPONSE_SECONDS = 0.5
+
+
+async def _pad_password_reset_response(started_at: float) -> None:
+    remaining = _PASSWORD_RESET_MIN_RESPONSE_SECONDS - (time.monotonic() - started_at)
+    if remaining > 0:
+        await asyncio.sleep(remaining)
+
+
+def _password_reset_request_response(email: str) -> dict[str, str]:
+    return {"message": "등록된 이메일이라면 인증 코드가 발송됩니다.", "email": email}
 
 
 def _reset_signup_role(login_role: str) -> str:
@@ -702,6 +716,7 @@ async def request_password_reset(
     request: Request, body: PasswordResetRequest, db: Session = Depends(get_db)
 ):
     """비밀번호 재설정 1단계: 이메일+role로 인증 코드를 발송합니다."""
+    started_at = time.monotonic()
     target_role = _RESET_ROLE_MAP[body.login_role]
     # 해당 이메일+role의 활성 계정이 있는지 확인
     user = (
@@ -726,40 +741,54 @@ async def request_password_reset(
         )
     if not user:
         # 보안상 존재하지 않는 이메일이어도 같은 메시지 반환
-        return {
-            "message": "등록된 이메일이라면 인증 코드가 발송됩니다.",
-            "email": body.email,
-        }
+        await _pad_password_reset_response(started_at)
+        return _password_reset_request_response(body.email)
 
-    sr = _reset_signup_role(body.login_role)
-    # 기존 미인증 비밀번호 재설정 레코드 삭제 (같은 role만)
-    db.query(EmailVerification).filter(
-        EmailVerification.email == body.email,
-        EmailVerification.signup_role == sr,
-        EmailVerification.verified == False,
-    ).delete()
-    db.commit()
+    if not user.hashed_password:
+        await _pad_password_reset_response(started_at)
+        return _password_reset_request_response(body.email)
 
-    code = generate_verification_code()
-    verification = EmailVerification(
-        email=body.email,
-        hashed_password="",  # 재설정이므로 기존 비밀번호 불필요
-        code=code,
-        signup_role=sr,
-        expires_at=now_kst()
-        + timedelta(minutes=settings.VERIFICATION_CODE_EXPIRE_MINUTES),
-    )
-    db.add(verification)
-    db.commit()
+    try:
+        sr = _reset_signup_role(body.login_role)
+        # 기존 미인증 비밀번호 재설정 레코드 삭제 (같은 role만)
+        db.query(EmailVerification).filter(
+            EmailVerification.email == body.email,
+            EmailVerification.signup_role == sr,
+            EmailVerification.verified == False,
+        ).delete()
+        db.commit()
+
+        code = generate_verification_code()
+        verification = EmailVerification(
+            email=body.email,
+            hashed_password="",  # 재설정이므로 기존 비밀번호 불필요
+            code=code,
+            signup_role=sr,
+            expires_at=now_kst()
+            + timedelta(minutes=settings.VERIFICATION_CODE_EXPIRE_MINUTES),
+        )
+        db.add(verification)
+        db.commit()
+    except SQLAlchemyError as e:
+        db.rollback()
+        logger.exception("[password-reset] DB 처리 실패: %s", e)
+        await _pad_password_reset_response(started_at)
+        raise HTTPException(status_code=503, detail="요청을 처리할 수 없습니다. 잠시 후 다시 시도해주세요.")
 
     sent = await send_verification_email(body.email, code)
     if not sent:
-        raise HTTPException(status_code=500, detail="인증 이메일 발송에 실패했습니다.")
+        logger.warning("[password-reset] 인증 이메일 발송 실패: %s", body.email)
+        try:
+            db.delete(verification)
+            db.commit()
+        except SQLAlchemyError as e:
+            db.rollback()
+            logger.exception("[password-reset] 실패 레코드 정리 실패: %s", e)
+        await _pad_password_reset_response(started_at)
+        raise HTTPException(status_code=503, detail="이메일 발송에 실패했습니다. 잠시 후 다시 시도해주세요.")
 
-    return {
-        "message": "등록된 이메일이라면 인증 코드가 발송됩니다.",
-        "email": body.email,
-    }
+    await _pad_password_reset_response(started_at)
+    return _password_reset_request_response(body.email)
 
 
 @router.post("/password-reset/confirm")

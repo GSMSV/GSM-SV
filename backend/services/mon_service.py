@@ -3,6 +3,7 @@ from models.server import Server
 from services.proxmox_client import get_proxmox_for_server
 from fastapi import HTTPException
 import logging
+from typing import Iterable
 
 logger = logging.getLogger(__name__)
 
@@ -27,18 +28,43 @@ def update_server_stats(db: Session, server: Server):
         db.commit()
         return free_ram_mb
     except Exception as e:
-        logger.error(f"서버 {server.name} 상태 업데이트 실패: {e}")
-        return 0
+        logger.exception(f"서버 {server.name} 상태 업데이트 실패: {e}")
+        try:
+            db.rollback()
+            server.last_free_ram_mb = 0
+            db.commit()
+        except Exception as db_err:
+            logger.exception(f"서버 {server.name} RAM 상태 초기화 실패: {db_err}")
+        return None
 
-def get_best_server(db: Session, required_ram_mb: int) -> Server:
+def get_best_server(
+    db: Session,
+    required_ram_mb: int,
+    *,
+    allowed_nodes: Iterable[str] | None = None,
+    excluded_nodes: Iterable[str] | None = None,
+) -> Server:
     """
     요구되는 RAM(MB)를 감당할 수 있으면서, 가장 여유 자원이 많은 서버를 찾습니다.
     (Resource-Based Auto Provisioning)
     """
     # 1. 활성화된 모든 서버 목록 가져오기
-    active_servers = db.query(Server).filter(Server.is_active == True).all()
+    query = db.query(Server).filter(Server.is_active == True)
+    if allowed_nodes is not None:
+        allowed_set = {node for node in allowed_nodes if node is not None}
+        if allowed_set:
+            query = query.filter(Server.name.in_(allowed_set))
+        else:
+            query = query.filter(Server.id == -1)
+    if excluded_nodes is not None:
+        excluded_set = {node for node in excluded_nodes if node is not None}
+        if excluded_set:
+            query = query.filter(~Server.name.in_(excluded_set))
+    active_servers = query.all()
     
     if not active_servers:
+        if allowed_nodes is not None or excluded_nodes is not None:
+            raise HTTPException(status_code=503, detail="요청 가능한 활성 서버가 없습니다.")
         raise HTTPException(status_code=500, detail="사용 가능한 활성 서버가 없습니다.")
     
     # 2. (옵션) 실시간에 가깝게 하기 위해 할당 전 모든 서버의 RAM 상태를 1회 갱신 (트래픽이 적을 때 유효)

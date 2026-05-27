@@ -15,7 +15,8 @@ from models.server import Server
 from models.vm import Vm
 from models.vm_port import VmPort
 from models.notification import Notification
-from schemas.vm_schema import VMCreate, VMTier
+from schemas.vm_schema import VMCreate, VMTier, SnapshotCreateRequest
+from api.routes.vmcontrol import create_snapshot
 from services.vm_service import (
     create_vm,
     delete_vm,
@@ -24,6 +25,7 @@ from services.vm_service import (
 )
 from services.network_service import calculate_ports, manage_iptables
 from services.mon_service import update_server_stats
+from services.mon_service import get_best_server
 
 # ── 테스트용 DB 엔진 ──────────────────────────────────────────
 
@@ -348,11 +350,11 @@ class TestVMNameValidation:
 # ── VM-TC-11: Proxmox 오프라인 시 update_server_stats ─────────
 
 class TestMonServiceFailure:
-    """VM-TC-11: Proxmox 접속 실패 시 DB 값 유지"""
+    """VM-TC-11: Proxmox 접속 실패 시 last_free_ram_mb 0으로 초기화"""
 
     @patch("services.mon_service.get_proxmox_for_server")
-    def test_failure_returns_none_keeps_db_value(self, mock_proxmox, db, server):
-        """Proxmox 실패 시 None 반환, last_free_ram_mb 이전 값 유지"""
+    def test_failure_returns_none_resets_db_value(self, mock_proxmox, db, server):
+        """Proxmox 실패 시 None 반환, last_free_ram_mb 0으로 초기화 (서버 선택 우선순위 제외)"""
         server.last_free_ram_mb = 8000
         db.commit()
 
@@ -360,9 +362,37 @@ class TestMonServiceFailure:
 
         result = update_server_stats(db, server)
         assert result is None
-        # DB 값이 변경되지 않아야 함
+        # 실패한 서버는 0으로 초기화되어 서버 선택에서 배제됨
         db.refresh(server)
-        assert server.last_free_ram_mb == 8000
+        assert server.last_free_ram_mb == 0
+
+    @patch("services.mon_service.get_proxmox_for_server")
+    def test_failure_reset_db_error_is_swallowed(self, mock_proxmox, db, server):
+        """상태 초기화 commit 실패도 update_server_stats 밖으로 전파하지 않는다."""
+        mock_proxmox.side_effect = Exception("connection refused")
+
+        with patch.object(db, "commit", side_effect=Exception("db down")):
+            result = update_server_stats(db, server)
+
+        assert result is None
+
+
+class TestFallbackIpAllocationLock:
+    """비-PostgreSQL fallback IP 할당 락 동작 검증"""
+
+    def test_fallback_lock_timeout_returns_503(self, db):
+        from fastapi import HTTPException
+        import services.vm_service as vm_service
+
+        acquired = vm_service._fallback_ip_allocation_lock.acquire(blocking=False)
+        assert acquired
+        try:
+            with patch("services.vm_service._FALLBACK_LOCK_TIMEOUT_SECONDS", 0.01):
+                with pytest.raises(HTTPException) as exc_info:
+                    vm_service._acquire_internal_ip_allocation_lock(db)
+            assert exc_info.value.status_code == 503
+        finally:
+            vm_service._fallback_ip_allocation_lock.release()
 
 
 # ── VM-TC-12: MAX_VMS_PER_USER 한도 초과 ─────────────────────
@@ -568,3 +598,191 @@ class TestVMIDRetry:
         proxmox.cluster.nextid.get.side_effect = Exception("API error")
         proxmox.nodes.return_value.qemu.get.return_value = []
         assert _get_next_vmid(proxmox, "node1") == 100
+
+
+class TestBestServerRoleFilters:
+    """자동 서버 선택 시 역할별 노드 필터링 검증"""
+
+    def _add_server(self, db, name: str, ram: int) -> Server:
+        server = Server(
+            name=name,
+            ip_address=f"192.168.1.{len(name)}",
+            port=8006,
+            api_user="root@pam",
+            api_password="password",
+            is_active=True,
+            gateway_ip="192.168.1.1",
+            gateway_user="admin",
+            gateway_password="gwpass",
+            base_port=22000 + len(name),
+            last_free_ram_mb=ram,
+        )
+        db.add(server)
+        db.commit()
+        db.refresh(server)
+        return server
+
+    @patch("services.mon_service.update_server_stats")
+    def test_excluded_nodes_are_not_selected(self, mock_update, db, server):
+        mock_update.side_effect = lambda session, selected: selected.last_free_ram_mb
+        project = self._add_server(db, "project-node", 64000)
+
+        selected = get_best_server(
+            db,
+            required_ram_mb=2048,
+            excluded_nodes={project.name},
+        )
+
+        assert selected.name == server.name
+
+    @patch("services.mon_service.update_server_stats")
+    def test_allowed_nodes_limit_selection(self, mock_update, db, server):
+        mock_update.side_effect = lambda session, selected: selected.last_free_ram_mb
+        project = self._add_server(db, "project-node", 64000)
+
+        selected = get_best_server(
+            db,
+            required_ram_mb=2048,
+            allowed_nodes={project.name},
+        )
+
+        assert selected.name == project.name
+
+    @patch("services.mon_service.update_server_stats")
+    def test_none_excluded_node_is_ignored(self, mock_update, db, server):
+        mock_update.side_effect = lambda session, selected: selected.last_free_ram_mb
+
+        selected = get_best_server(
+            db,
+            required_ram_mb=2048,
+            excluded_nodes={None},
+        )
+
+        assert selected.name == server.name
+
+    @patch("services.mon_service.update_server_stats")
+    def test_none_only_allowed_nodes_matches_no_server(self, mock_update, db, server):
+        from fastapi import HTTPException
+
+        mock_update.side_effect = lambda session, selected: selected.last_free_ram_mb
+
+        with pytest.raises(HTTPException) as exc_info:
+            get_best_server(
+                db,
+                required_ram_mb=2048,
+                allowed_nodes={None},
+            )
+
+        assert exc_info.value.status_code == 503
+
+    @patch("services.mon_service.update_server_stats")
+    def test_excluded_nodes_filter_matching_all_servers_returns_503(self, mock_update, db, server):
+        from fastapi import HTTPException
+
+        mock_update.side_effect = lambda session, selected: selected.last_free_ram_mb
+
+        with pytest.raises(HTTPException) as exc_info:
+            get_best_server(
+                db,
+                required_ram_mb=2048,
+                excluded_nodes={server.name},
+            )
+
+        assert exc_info.value.status_code == 503
+
+    @patch("services.vm_service.settings")
+    @patch("services.mon_service.get_best_server")
+    def test_admin_basic_auto_assignment_excludes_project_node(
+        self, mock_best_server, mock_settings, db, admin_user
+    ):
+        from fastapi import HTTPException
+
+        mock_settings.PROJECT_NODE_NAME = "project-node"
+        mock_best_server.side_effect = HTTPException(status_code=418, detail="stop")
+
+        with pytest.raises(HTTPException):
+            create_vm(db, admin_user, VMTier.MICRO)
+
+        assert mock_best_server.call_args.kwargs["excluded_nodes"] == {"project-node"}
+
+    @patch("services.vm_service.settings")
+    @patch("services.mon_service.get_best_server")
+    def test_admin_project_custom_auto_assignment_uses_project_node(
+        self, mock_best_server, mock_settings, db, admin_user
+    ):
+        from fastapi import HTTPException
+
+        mock_settings.PROJECT_NODE_NAME = "project-node"
+        mock_best_server.side_effect = HTTPException(status_code=418, detail="stop")
+
+        with pytest.raises(HTTPException):
+            create_vm(db, admin_user, VMTier.PROJECT_CUSTOM)
+
+        assert mock_best_server.call_args.kwargs["allowed_nodes"] == {"project-node"}
+
+
+class TestSnapshotCreation:
+    """스냅샷 생성 정책 검증"""
+
+    @pytest.mark.asyncio
+    @patch("api.routes.vmcontrol.get_proxmox_for_server")
+    async def test_duplicate_snapshot_name_returns_400(self, mock_proxmox_fn, db, user, server):
+        proxmox = MagicMock()
+        qemu = proxmox.nodes.return_value.qemu.return_value
+        qemu.snapshot.get.return_value = [
+            {"name": "current"},
+            {"name": "manual-1"},
+        ]
+        mock_proxmox_fn.return_value = proxmox
+        db.add(Vm(
+            hypervisor_vmid=200,
+            name="test-vm",
+            server_id=server.id,
+            owner_id=user.id,
+            internal_ip="10.0.0.100",
+        ))
+        db.commit()
+
+        from fastapi import HTTPException
+        with pytest.raises(HTTPException) as exc_info:
+            await create_snapshot(
+                node=server.name,
+                vmid=200,
+                body=SnapshotCreateRequest(name="manual-1"),
+                db=db,
+                current_user=user,
+            )
+
+        assert exc_info.value.status_code == 400
+        assert "이미 존재" in exc_info.value.detail
+        qemu.snapshot.post.assert_not_called()
+
+    @pytest.mark.asyncio
+    @patch("api.routes.vmcontrol.get_proxmox_for_server")
+    async def test_none_snapshot_name_does_not_crash(self, mock_proxmox_fn, db, user, server):
+        proxmox = MagicMock()
+        qemu = proxmox.nodes.return_value.qemu.return_value
+        qemu.snapshot.get.return_value = [
+            {"name": "current"},
+            {"name": None},
+        ]
+        qemu.snapshot.post.return_value = "UPID:test"
+        mock_proxmox_fn.return_value = proxmox
+        db.add(Vm(
+            hypervisor_vmid=201,
+            name="test-vm-2",
+            server_id=server.id,
+            owner_id=user.id,
+            internal_ip="10.0.0.101",
+        ))
+        db.commit()
+
+        result = await create_snapshot(
+            node=server.name,
+            vmid=201,
+            body=SnapshotCreateRequest(name="manual-2"),
+            db=db,
+            current_user=user,
+        )
+
+        assert result["success"] is True
