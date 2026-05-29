@@ -56,10 +56,11 @@ async def mark_all_as_read(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """모든 알림 삭제"""
+    """모든 알림 읽음 처리"""
     db.query(Notification).filter(
         Notification.user_id == current_user.id,
-    ).delete()
+        Notification.is_read.is_(False),
+    ).update({"is_read": True}, synchronize_session="fetch")
     db.commit()
     return {"success": True}
 

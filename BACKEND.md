@@ -315,7 +315,7 @@ SVC  : base_port + 2000 + vmid
 |--------|------|------|
 | GET | `` | 알림 목록 (최신 50개) |
 | PATCH | `/{notification_id}/read` | 단일 알림 읽음 처리 |
-| POST | `/read-all` | 전체 알림 삭제 |
+| POST | `/read-all` | 전체 알림 읽음 처리 |
 | DELETE | `/{notification_id}` | 단일 알림 삭제 |
 
 모든 엔드포인트 인증 필요. 알림 타입: `info` / `success` / `error`
