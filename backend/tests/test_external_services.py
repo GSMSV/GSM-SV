@@ -399,13 +399,34 @@ class TestProxmoxExceptionMapping:
 class TestNotificationsReadAll:
     """EXT-TC-06: read-all은 삭제가 아닌 is_read=True 설정"""
 
-    def test_read_all_endpoint_marks_as_read_not_delete(self, db, user):
-        """POST /read-all은 알림을 삭제하지 않고 읽음 처리"""
+    def _make_client(self, db, user):
         from fastapi import FastAPI
         from fastapi.testclient import TestClient
         from api.dependencies import get_current_user
         from api.routes import notifications
         from core.database import get_db
+
+        app = FastAPI()
+        app.include_router(notifications.router, prefix="/api/v1/notifications")
+
+        def override_db():
+            yield db
+
+        app.dependency_overrides[get_db] = override_db
+        app.dependency_overrides[get_current_user] = lambda: user
+        return TestClient(app)
+
+    def test_read_all_endpoint_scopes_to_current_user(self, db, user):
+        """POST /read-all은 현재 사용자 알림만 읽음 처리"""
+        other_user = User(
+            email="other@gsm.hs.kr",
+            hashed_password="hashed",
+            role=UserRole.USER,
+            is_active=True,
+        )
+        db.add(other_user)
+        db.commit()
+        db.refresh(other_user)
 
         for i in range(2):
             db.add(
@@ -416,56 +437,32 @@ class TestNotificationsReadAll:
                     is_read=False,
                 )
             )
+        db.add(
+            Notification(
+                user_id=other_user.id,
+                type="info",
+                message="다른 사용자 알림",
+                is_read=False,
+            )
+        )
         db.commit()
 
-        app = FastAPI()
-        app.include_router(notifications.router, prefix="/api/v1/notifications")
-
-        def override_db():
-            yield db
-
-        app.dependency_overrides[get_db] = override_db
-        app.dependency_overrides[get_current_user] = lambda: user
-
-        with TestClient(app) as client:
+        with self._make_client(db, user) as client:
             response = client.post("/api/v1/notifications/read-all")
+            user_notifs = (
+                db.query(Notification).filter(Notification.user_id == user.id).all()
+            )
+            other_notif = (
+                db.query(Notification)
+                .filter(Notification.user_id == other_user.id)
+                .one()
+            )
 
         assert response.status_code == 200
         assert response.json() == {"success": True}
-
-        all_notifs = (
-            db.query(Notification).filter(Notification.user_id == user.id).all()
-        )
-        assert len(all_notifs) == 2
-        assert all(n.is_read for n in all_notifs)
-
-    def test_read_all_marks_as_read_not_delete(self, db, user):
-        """미읽음 5개 → read-all → 5개 모두 is_read=True, 삭제 아님"""
-        for i in range(5):
-            db.add(
-                Notification(
-                    user_id=user.id,
-                    type="info",
-                    message=f"알림 {i}",
-                    is_read=False,
-                )
-            )
-        db.commit()
-
-        # read-all 로직 시뮬레이션 (notifications.py의 mark_all_as_read)
-        db.query(Notification).filter(
-            Notification.user_id == user.id,
-            Notification.is_read == False,
-        ).update({"is_read": True})
-        db.commit()
-
-        # 삭제되지 않았는지 확인
-        all_notifs = (
-            db.query(Notification).filter(Notification.user_id == user.id).all()
-        )
-        assert len(all_notifs) == 5
-        # 모두 읽음 상태
-        assert all(n.is_read for n in all_notifs)
+        assert len(user_notifs) == 2
+        assert all(n.is_read for n in user_notifs)
+        assert other_notif.is_read is False
 
     def test_read_all_idempotent(self, db, user):
         """이미 읽은 알림에 다시 read-all 해도 문제 없음"""
@@ -479,14 +476,12 @@ class TestNotificationsReadAll:
         )
         db.commit()
 
-        db.query(Notification).filter(
-            Notification.user_id == user.id,
-            Notification.is_read == False,
-        ).update({"is_read": True})
-        db.commit()
+        with self._make_client(db, user) as client:
+            response = client.post("/api/v1/notifications/read-all")
+            all_notifs = (
+                db.query(Notification).filter(Notification.user_id == user.id).all()
+            )
 
-        all_notifs = (
-            db.query(Notification).filter(Notification.user_id == user.id).all()
-        )
+        assert response.status_code == 200
         assert len(all_notifs) == 2
         assert all(n.is_read for n in all_notifs)
