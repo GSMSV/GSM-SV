@@ -46,7 +46,7 @@ router.post("/", async (req, res, next) => {
 
 router.get("/", async (req, res, next) => {
   try {
-    const where = req.user!.role === "admin" ? {} : { ownerId: req.user!.userId };
+    const where = { ownerId: req.user!.userId };
     const functions = await prisma.function.findMany({ where, orderBy: { createdAt: "desc" } });
     res.json(functions.map(f => ({ ...f, envVars: JSON.parse(f.envVars) })));
   } catch (err) { next(err); }
