@@ -8,22 +8,15 @@ from typing import Iterable
 logger = logging.getLogger(__name__)
 
 def update_server_stats(db: Session, server: Server):
-    """
-    특정 서버(Proxmox Node)에 비동기로 접속하여 잔여 RAM 용량을 조회하고 DB를 업데이트합니다.
-    """
+    """특정 서버(Proxmox Node)에 비동기로 접속하여 잔여 RAM 용량을 조회하고 DB를 업데이트합니다."""
     try:
-        # 실제 API 호출
         proxmox = get_proxmox_for_server(server)
-        # 노드 상태 정보 가져오기 (이름 매칭 필요)
-        # Proxmox 클러스터 내의 노드 이름은 보통 server.name 과 일치해야 합니다.
         node_status = proxmox.nodes(server.name).status.get()
-        
-        # 전체 RAM - 사용 중인 RAM = 여유 RAM (바이트 -> MB 변환)
+
         total_memory = node_status.get('memory', {}).get('total', 0)
         used_memory = node_status.get('memory', {}).get('used', 0)
         free_ram_mb = (total_memory - used_memory) // (1024 * 1024)
-        
-        # DB 업데이트
+
         server.last_free_ram_mb = free_ram_mb
         db.commit()
         return free_ram_mb
@@ -36,6 +29,33 @@ def update_server_stats(db: Session, server: Server):
         except Exception as db_err:
             logger.exception(f"서버 {server.name} RAM 상태 초기화 실패: {db_err}")
         return None
+
+
+def get_server_resource_usage(server: Server) -> dict:
+    """서버의 CPU·RAM·SSD 사용률(%)을 실시간 조회해 반환합니다."""
+    proxmox = get_proxmox_for_server(server)
+    node_status = proxmox.nodes(server.name).status.get()
+
+    memory = node_status.get('memory', {})
+    total_mem = memory.get('total', 0)
+    used_mem = memory.get('used', 0)
+    ram_pct = round(used_mem / total_mem * 100, 1) if total_mem else 0.0
+
+    cpu_pct = round(node_status.get('cpu', 0) * 100, 1)
+
+    disk_used = 0
+    disk_total = 0
+    try:
+        storages = proxmox.nodes(server.name).storage.get()
+        for st in storages:
+            if st.get("type") == "lvmthin":
+                disk_used += st.get("used", 0)
+                disk_total += st.get("total", 0)
+    except Exception:
+        pass
+    disk_pct = round(disk_used / disk_total * 100, 1) if disk_total else None
+
+    return {"ram_pct": ram_pct, "cpu_pct": cpu_pct, "disk_pct": disk_pct}
 
 def get_best_server(
     db: Session,

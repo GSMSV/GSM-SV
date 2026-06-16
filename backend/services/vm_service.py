@@ -32,12 +32,12 @@ _FALLBACK_LOCK_INFO_KEY = "internal_ip_allocation_lock_held"
 
 def _generate_password(length: int = 8) -> str:
     """영문+숫자+특수문자 랜덤 비밀번호 생성"""
-    chars = string.ascii_letters + string.digits + "!@#$%&*"
+    chars = string.ascii_letters + string.digits + "!@#%&*"
     password = ''.join(secrets.choice(chars) for _ in range(length))
     # 최소 조건 보장 (영문 + 숫자 + 특수문자 각 1개 이상)
     if not (any(c in string.ascii_letters for c in password)
             and any(c in string.digits for c in password)
-            and any(c in "!@#$%&*" for c in password)):
+            and any(c in "!@#%&*" for c in password)):
         return _generate_password(length)
     return password
 
@@ -358,19 +358,29 @@ def create_vm(
                 detail=f"노드 '{node_name}'을(를) 찾을 수 없거나 비활성 상태입니다.",
             )
     else:
-        project_node = settings.PROJECT_NODE_NAME
-        if tier == VMTierEnum.PROJECT_CUSTOM or current_user.role == UserRole.PROJECT_OWNER:
-            server = get_best_server(
-                db,
-                required_ram_mb=specs["memory"],
-                allowed_nodes={project_node},
+        raise HTTPException(status_code=400, detail="노드를 선택해주세요.")
+
+    # 1-1. 서버 자원 실시간 조회 후 80% 임계값 체크
+    from services.mon_service import get_server_resource_usage
+    try:
+        usage = get_server_resource_usage(server)
+        THRESHOLD = 80.0
+        overloaded = []
+        if usage["ram_pct"] >= THRESHOLD:
+            overloaded.append(f"RAM {usage['ram_pct']}%")
+        if usage["cpu_pct"] >= THRESHOLD:
+            overloaded.append(f"CPU {usage['cpu_pct']}%")
+        if usage["disk_pct"] is not None and usage["disk_pct"] >= THRESHOLD:
+            overloaded.append(f"SSD {usage['disk_pct']}%")
+        if overloaded:
+            raise HTTPException(
+                status_code=507,
+                detail=f"서버 자원이 부족합니다 ({', '.join(overloaded)} 점유 중). 75% 이하로 내려오면 다시 시도해주세요.",
             )
-        else:
-            server = get_best_server(
-                db,
-                required_ram_mb=specs["memory"],
-                excluded_nodes={project_node},
-            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.warning(f"서버 {server.name} 자원 조회 실패, 체크 건너뜀: {e}")
 
     # 2. OS별 템플릿 및 유저명 결정
     from schemas.vm_schema import VMOs
