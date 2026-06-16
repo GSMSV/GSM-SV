@@ -4,6 +4,7 @@
 - FastAPI TestClient 제공
 """
 import pytest
+from unittest.mock import patch
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from core.database import Base, get_db
@@ -21,6 +22,16 @@ def setup_db():
     Base.metadata.create_all(bind=engine)
     yield
     Base.metadata.drop_all(bind=engine)
+
+
+@pytest.fixture(autouse=True)
+def mock_server_resource_usage():
+    """모든 테스트에서 Proxmox 자원 조회를 mock — 실제 연결 없이 80% 체크 통과"""
+    with patch(
+        "services.mon_service.get_server_resource_usage",
+        return_value={"ram_pct": 10.0, "cpu_pct": 10.0, "disk_pct": 10.0, "free_ram_mb": 99999},
+    ):
+        yield
 
 
 @pytest.fixture
