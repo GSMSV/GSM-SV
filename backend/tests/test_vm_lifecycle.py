@@ -690,35 +690,13 @@ class TestBestServerRoleFilters:
 
         assert exc_info.value.status_code == 503
 
-    @patch("services.vm_service.settings")
-    @patch("services.mon_service.get_best_server")
-    def test_admin_basic_auto_assignment_excludes_project_node(
-        self, mock_best_server, mock_settings, db, admin_user
-    ):
+    def test_create_vm_without_node_name_returns_400(self, db, admin_user):
         from fastapi import HTTPException
 
-        mock_settings.PROJECT_NODE_NAME = "project-node"
-        mock_best_server.side_effect = HTTPException(status_code=418, detail="stop")
-
-        with pytest.raises(HTTPException):
+        with pytest.raises(HTTPException) as exc_info:
             create_vm(db, admin_user, VMTier.MICRO)
 
-        assert mock_best_server.call_args.kwargs["excluded_nodes"] == {"project-node"}
-
-    @patch("services.vm_service.settings")
-    @patch("services.mon_service.get_best_server")
-    def test_admin_project_custom_auto_assignment_uses_project_node(
-        self, mock_best_server, mock_settings, db, admin_user
-    ):
-        from fastapi import HTTPException
-
-        mock_settings.PROJECT_NODE_NAME = "project-node"
-        mock_best_server.side_effect = HTTPException(status_code=418, detail="stop")
-
-        with pytest.raises(HTTPException):
-            create_vm(db, admin_user, VMTier.PROJECT_CUSTOM)
-
-        assert mock_best_server.call_args.kwargs["allowed_nodes"] == {"project-node"}
+        assert exc_info.value.status_code == 400
 
 
 class TestSnapshotCreation:

@@ -32,13 +32,18 @@ def update_server_stats(db: Session, server: Server):
 
 
 def get_server_resource_usage(server: Server) -> dict:
-    """서버의 CPU·RAM·SSD 사용률(%)을 실시간 조회해 반환합니다."""
-    proxmox = get_proxmox_for_server(server)
-    node_status = proxmox.nodes(server.name).status.get()
+    """서버의 CPU·RAM·SSD 사용률(%)과 가용 RAM(MB)을 실시간 조회해 반환합니다."""
+    try:
+        proxmox = get_proxmox_for_server(server)
+        node_status = proxmox.nodes(server.name).status.get()
+    except Exception:
+        logger.exception(f"서버 {server.name} 노드 상태 조회 실패")
+        raise
 
     memory = node_status.get('memory') or {}
     total_mem = memory.get('total') or 0
     used_mem = memory.get('used') or 0
+    free_ram_mb = (total_mem - used_mem) // (1024 * 1024)
     ram_pct = round(used_mem / total_mem * 100, 1) if total_mem else 0.0
 
     cpu_pct = round((node_status.get('cpu') or 0) * 100, 1)
@@ -55,7 +60,7 @@ def get_server_resource_usage(server: Server) -> dict:
         logger.exception(f"서버 {server.name} 스토리지 조회 실패")
     disk_pct = round(disk_used / disk_total * 100, 1) if disk_total else None
 
-    return {"ram_pct": ram_pct, "cpu_pct": cpu_pct, "disk_pct": disk_pct}
+    return {"ram_pct": ram_pct, "cpu_pct": cpu_pct, "disk_pct": disk_pct, "free_ram_mb": free_ram_mb}
 
 def get_best_server(
     db: Session,

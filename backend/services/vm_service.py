@@ -303,8 +303,6 @@ def create_vm(
     7. iptables 포트포워딩 등록
     8. VM 부팅 + DB 저장
     """
-    from services.mon_service import get_best_server
-
     # 0. VM 개수 제한 (ADMIN, PROJECT_OWNER는 제한 없음)
     if current_user.role == UserRole.USER:
         user_vm_count = db.query(Vm).filter(Vm.owner_id == current_user.id).count()
@@ -360,7 +358,7 @@ def create_vm(
     else:
         raise HTTPException(status_code=400, detail="노드를 선택해주세요.")
 
-    # 1-1. 서버 자원 실시간 조회 후 80% 임계값 체크
+    # 1-1. 서버 자원 실시간 조회 후 80% 임계값 체크 + 절대 RAM 검증
     from services.mon_service import get_server_resource_usage
     try:
         usage = get_server_resource_usage(server)
@@ -376,6 +374,11 @@ def create_vm(
             raise HTTPException(
                 status_code=507,
                 detail=f"서버 자원이 부족합니다 ({', '.join(overloaded)} 점유 중). {THRESHOLD}% 미만으로 내려오면 다시 시도해주세요.",
+            )
+        if usage["free_ram_mb"] < specs["memory"]:
+            raise HTTPException(
+                status_code=507,
+                detail=f"서버 가용 RAM이 부족합니다 (필요: {specs['memory']}MB, 가용: {usage['free_ram_mb']}MB).",
             )
     except HTTPException:
         raise
