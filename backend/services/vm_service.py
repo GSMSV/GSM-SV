@@ -375,7 +375,7 @@ def create_vm(
         if overloaded:
             raise HTTPException(
                 status_code=507,
-                detail=f"서버 자원이 부족합니다 ({', '.join(overloaded)} 점유 중). 75% 이하로 내려오면 다시 시도해주세요.",
+                detail=f"서버 자원이 부족합니다 ({', '.join(overloaded)} 점유 중). {THRESHOLD}% 미만으로 내려오면 다시 시도해주세요.",
             )
     except HTTPException:
         raise

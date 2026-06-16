@@ -36,12 +36,12 @@ def get_server_resource_usage(server: Server) -> dict:
     proxmox = get_proxmox_for_server(server)
     node_status = proxmox.nodes(server.name).status.get()
 
-    memory = node_status.get('memory', {})
-    total_mem = memory.get('total', 0)
-    used_mem = memory.get('used', 0)
+    memory = node_status.get('memory') or {}
+    total_mem = memory.get('total') or 0
+    used_mem = memory.get('used') or 0
     ram_pct = round(used_mem / total_mem * 100, 1) if total_mem else 0.0
 
-    cpu_pct = round(node_status.get('cpu', 0) * 100, 1)
+    cpu_pct = round((node_status.get('cpu') or 0) * 100, 1)
 
     disk_used = 0
     disk_total = 0
@@ -49,10 +49,10 @@ def get_server_resource_usage(server: Server) -> dict:
         storages = proxmox.nodes(server.name).storage.get()
         for st in storages:
             if st.get("type") == "lvmthin":
-                disk_used += st.get("used", 0)
-                disk_total += st.get("total", 0)
+                disk_used += st.get("used") or 0
+                disk_total += st.get("total") or 0
     except Exception:
-        pass
+        logger.exception(f"서버 {server.name} 스토리지 조회 실패")
     disk_pct = round(disk_used / disk_total * 100, 1) if disk_total else None
 
     return {"ram_pct": ram_pct, "cpu_pct": cpu_pct, "disk_pct": disk_pct}
