@@ -72,19 +72,25 @@ def _generate_pkce() -> tuple[str, str]:
 
 @router.get("/authorize")
 @limiter.limit("10/minute")
-async def oauth_authorize(request: Request):
+async def oauth_authorize(
+    request: Request,
+    login_role: str = Query(default="user", description="로그인 역할: user / project_owner / admin"),
+):
     """DataGSM OAuth 인증 시작 — 사용자를 DataGSM 로그인 페이지로 리다이렉트"""
+    if login_role not in ("user", "project_owner", "admin"):
+        raise HTTPException(status_code=400, detail="유효하지 않은 login_role입니다.")
+
     state = secrets.token_urlsafe(32)
     verifier, challenge = _generate_pkce()
 
-    # state → (verifier, 만료시간) 저장
+    # state → (verifier, 만료시간, login_role) 저장
     _cleanup_stores()
     with _store_lock:
         if len(_pkce_store) > 1000:
             raise HTTPException(
                 status_code=503, detail="서버가 바쁩니다. 잠시 후 다시 시도해주세요."
             )
-        _pkce_store[state] = (verifier, time.time() + _STORE_TTL)
+        _pkce_store[state] = (verifier, time.time() + _STORE_TTL, login_role)
 
     params = {
         "client_id": settings.DATAGSM_CLIENT_ID,
@@ -106,7 +112,7 @@ async def oauth_callback(
 ):
     """DataGSM 콜백 — code로 토큰 교환 → userinfo 조회 → 우리 JWT 발급"""
 
-    # 1. PKCE verifier 꺼내기
+    # 1. PKCE verifier + login_role 꺼내기
     with _store_lock:
         entry = _pkce_store.pop(state, None)
     if not entry or (isinstance(entry, tuple) and entry[1] < time.time()):
@@ -115,6 +121,7 @@ async def oauth_callback(
             detail="유효하지 않거나 만료된 state입니다. 다시 로그인해주세요.",
         )
     verifier = entry[0] if isinstance(entry, tuple) else entry
+    login_role = entry[2] if isinstance(entry, tuple) and len(entry) > 2 else "user"
     if not verifier:
         raise HTTPException(
             status_code=400, detail="유효하지 않은 state입니다. 다시 로그인해주세요."
@@ -186,20 +193,30 @@ async def oauth_callback(
     if not email:
         raise HTTPException(status_code=400, detail="이메일 정보를 가져올 수 없습니다.")
 
-    # 5. 기존 유저 매칭 (OAuth는 일반 USER 계정으로만 로그인)
-    # 동일 이메일의 PROJECT_OWNER 계정은 별도 계정으로 공존할 수 있습니다.
-    user = (
-        db.query(User).filter(User.email == email, User.role == UserRole.USER).first()
-    )
+    # 5. 기존 유저 매칭 (login_role 기준)
+    role_map = {
+        "user": UserRole.USER,
+        "project_owner": UserRole.PROJECT_OWNER,
+        "admin": UserRole.ADMIN,
+    }
+    target_role = role_map.get(login_role, UserRole.USER)
 
-    if db.query(User).filter(
-        User.email == email,
-        User.role == UserRole.ADMIN,
-    ).first():
-        raise HTTPException(
-            status_code=409,
-            detail="해당 이메일은 다른 권한 계정으로 이미 존재합니다.",
-        )
+    user = db.query(User).filter(User.email == email, User.role == target_role).first()
+
+    # USER 로그인 시도인데 USER 계정이 없으면 ADMIN 단독 계정으로 fallback
+    if not user and target_role == UserRole.USER:
+        admin_user = db.query(User).filter(User.email == email, User.role == UserRole.ADMIN).first()
+        if admin_user:
+            has_other = db.query(User).filter(
+                User.email == email,
+                User.role == UserRole.PROJECT_OWNER,
+            ).first()
+            if has_other:
+                raise HTTPException(
+                    status_code=409,
+                    detail="해당 이메일은 다른 권한 계정으로 이미 존재합니다.",
+                )
+            user = admin_user
 
     if user:
         # 기존 계정에 OAuth 연결
@@ -218,8 +235,13 @@ async def oauth_callback(
         if major:
             user.major = major
         db.commit()
+    elif target_role != UserRole.USER:
+        raise HTTPException(
+            status_code=404,
+            detail="해당 이메일로 가입된 계정이 없습니다.",
+        )
     else:
-        # 새 계정 생성 (비밀번호 없음 — OAuth 전용)
+        # 새 계정 생성 (비밀번호 없음 — OAuth 전용, USER만 해당)
         user = User(
             email=email,
             hashed_password=None,
