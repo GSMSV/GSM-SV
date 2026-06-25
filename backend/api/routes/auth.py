@@ -600,11 +600,15 @@ async def login(
     if not user and login_role == "user":
         user = _find_user_by_email_role(db, form_data.username, UserRole.ADMIN)
 
-    if (
-        not user
-        or not user.hashed_password
-        or not verify_password(form_data.password, user.hashed_password)
+    if not user or not verify_password(
+        form_data.password, user.hashed_password or ""
     ):
+        if user and not user.hashed_password:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="DataGSM OAuth로 로그인해주세요.",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="이메일 또는 비밀번호가 일치하지 않습니다.",
@@ -746,7 +750,9 @@ async def request_password_reset(
 
     if not user.hashed_password:
         await _pad_password_reset_response(started_at)
-        return _password_reset_request_response(body.email)
+        raise HTTPException(
+            status_code=400, detail="DataGSM OAuth로 등록된 계정입니다."
+        )
 
     try:
         sr = _reset_signup_role(body.login_role)
