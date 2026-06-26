@@ -391,8 +391,8 @@ class TestChangePassword:
         )
         assert len(recs) == 0, "PO 계정이 없으므로 레코드도 생성되지 않아야 함"
 
-    def test_password_reset_request_oauth_user_silently_succeeds_without_record(self, client, db):
-        """OAuth 계정은 비밀번호 재설정 레코드와 메일 발송 없이 같은 성공 응답을 반환한다."""
+    def test_password_reset_request_oauth_user_returns_oauth_guidance(self, client, db):
+        """OAuth 계정은 재설정 레코드·메일 발송 없이 OAuth 안내 메시지를 반환한다."""
         from models.email_verification import EmailVerification
         from unittest.mock import patch
 
@@ -405,8 +405,8 @@ class TestChangePassword:
                 json={"email": "oauth-reset@gsm.hs.kr", "login_role": "user"},
             )
 
-        assert res.status_code == 200, res.text
-        assert res.json()["email"] == "oauth-reset@gsm.hs.kr"
+        assert res.status_code == 400, res.text
+        assert "OAuth" in res.json()["detail"]
         mock_send.assert_not_called()
         records = (
             db.query(EmailVerification)
@@ -475,6 +475,17 @@ class TestChangePassword:
             data={"username": "login@gsm.hs.kr", "password": "OldPass1!"},
         )
         assert old_login.status_code == 401
+
+    def test_login_oauth_user_returns_oauth_guidance(self, client, db):
+        """OAuth 계정(hashed_password 없음)으로 자체 로그인 시도 시 OAuth 안내 메시지를 반환한다."""
+        _make_user(db, email="oauth-login@gsm.hs.kr", oauth=True)
+
+        res = client.post(
+            "/api/v1/auth/login",
+            data={"username": "oauth-login@gsm.hs.kr", "password": "anything"},
+        )
+        assert res.status_code == 401
+        assert "OAuth" in res.json()["detail"]
 
     def test_admin_password_reset_request_creates_record(self, client, db):
         """ADMIN 계정은 user 탭(login_role=user)으로 재설정 요청 시 레코드가 생성된다."""
