@@ -59,6 +59,10 @@ class Settings(BaseSettings):
     # 프로젝트 오너 전용 설정
     PROJECT_NODE_NAME: str = "gsmgpu3"            # 프로젝트 VM 전용 노드
 
+    # Discord 모니터링 알림
+    DISCORD_WEBHOOK_URL: str = ""
+    DISCORD_DAILY_HOUR: int = 9
+
     # 내부 네트워크 (단일 서브넷)
     INTERNAL_SUBNET: str = "10.0.0"                  # /24 서브넷 프리픽스
     INTERNAL_IP_START: int = 100                     # 할당 시작 (.100)

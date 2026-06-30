@@ -1,4 +1,5 @@
 import asyncio
+import httpx
 import os
 from contextlib import asynccontextmanager
 from datetime import timedelta
@@ -30,6 +31,8 @@ from core.init_servers import sync_servers
 from models.vm import Vm
 from models.notification import Notification
 from models.user import User, UserRole
+from models.server import Server
+from services.mon_service import get_server_resource_usage
 from models.faq_question import FaqQuestion  # noqa: F401 — create_all 자동 반영
 from models.vm_port import VmPort  # noqa: F401 — create_all 자동 반영
 
@@ -502,6 +505,133 @@ async def _oauth_store_cleanup_loop():
         await asyncio.sleep(BACKGROUND_FAST_RETRY_SECONDS)  # 5분마다
 
 
+def _collect_discord_daily_report(db, now) -> dict:
+    """활성 노드 사용률 + 7일 이내 만료 VM 목록을 수집."""
+    nodes = []
+    for server in db.query(Server).filter(Server.is_active == True).all():
+        try:
+            usage = get_server_resource_usage(server)
+            nodes.append({
+                "name": server.name,
+                "cpu_pct": usage["cpu_pct"],
+                "ram_pct": usage["ram_pct"],
+                "disk_pct": usage["disk_pct"],
+                "ok": usage["cpu_pct"] < 90 and usage["ram_pct"] < 90,
+            })
+        except Exception:
+            logger.exception(f"[discord-daily] 노드 {server.name} 상태 조회 실패")
+            nodes.append({
+                "name": server.name,
+                "cpu_pct": None,
+                "ram_pct": None,
+                "disk_pct": None,
+                "ok": False,
+            })
+
+    soon_vms = (
+        db.query(Vm)
+        .filter(
+            Vm.expires_at.isnot(None),
+            Vm.expires_at > now,
+            Vm.expires_at <= now + timedelta(days=7),
+        )
+        .order_by(Vm.expires_at.asc())
+        .all()
+    )
+    vms = [
+        {
+            "name": vm.name,
+            "owner_email": vm.owner.email if vm.owner else "(소유자 없음)",
+            "days_left": (vm.expires_at - now.replace(tzinfo=None)).days,
+            "expires_at": vm.expires_at,
+        }
+        for vm in soon_vms
+    ]
+
+    return {"nodes": nodes, "vms": vms}
+
+
+def _format_discord_daily_message(report: dict, now) -> str:
+    """일일 리포트 데이터를 Discord 메시지 텍스트로 변환."""
+    lines = [f"🖥️ GSM-SV 일일 모니터링 리포트 — {now.strftime('%Y-%m-%d %H:%M')}", "", "[노드 상태]"]
+
+    for node in report["nodes"]:
+        if node["cpu_pct"] is None:
+            lines.append(f"{node['name']}  조회 실패  🔴")
+            continue
+        icon = "✅" if node["ok"] else "⚠️"
+        disk = f"{node['disk_pct']}%" if node["disk_pct"] is not None else "N/A"
+        lines.append(
+            f"{node['name']}  CPU {node['cpu_pct']}%  RAM {node['ram_pct']}%  Disk {disk}  {icon}"
+        )
+
+    if report["vms"]:
+        lines.append("")
+        lines.append("[만료 예정 VM]")
+        for vm in report["vms"]:
+            lines.append(
+                f"{vm['name']}  {vm['owner_email']}  D-{vm['days_left']}  ({vm['expires_at'].strftime('%Y-%m-%d')})"
+            )
+
+    return "\n".join(lines)
+
+
+async def _send_discord_message(content: str) -> None:
+    """Discord 웹훅으로 메시지 발송. URL 미설정 시 스킵."""
+    if not settings.DISCORD_WEBHOOK_URL:
+        logger.warning("[discord-daily] DISCORD_WEBHOOK_URL 미설정 — 발송 스킵")
+        return
+    async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
+        response = await client.post(settings.DISCORD_WEBHOOK_URL, json={"content": content})
+        response.raise_for_status()
+
+
+async def _discord_daily_loop():
+    """매일 KST DISCORD_DAILY_HOUR시, 노드 상태 + 만료 예정 VM Discord 요약 발송."""
+    consecutive_failures = 0
+    while True:
+        db = None
+        try:
+            if consecutive_failures == 0:
+                now = now_kst()
+                wait = _next_notify_sleep_seconds(now, [settings.DISCORD_DAILY_HOUR])
+                await asyncio.sleep(wait)
+
+            db = SessionLocal()
+            now = now_kst()
+            report = _collect_discord_daily_report(db, now)
+            message = _format_discord_daily_message(report, now)
+            await _send_discord_message(message)
+            logger.info("[discord-daily] 일일 모니터링 리포트 발송 완료")
+            consecutive_failures = 0
+        except Exception as e:
+            if db:
+                db.rollback()
+            consecutive_failures += 1
+            logger.exception(
+                f"[discord-daily] 백그라운드 태스크 오류 ({consecutive_failures}회 연속): {e}"
+            )
+            if consecutive_failures >= BACKGROUND_FAILURE_NOTIFY_THRESHOLD:
+                logger.critical(
+                    f"[discord-daily] 연속 {consecutive_failures}회 실패 — 점검 필요"
+                )
+            if consecutive_failures == BACKGROUND_FAILURE_NOTIFY_THRESHOLD:
+                try:
+                    await asyncio.to_thread(
+                        _notify_admins_background_failure,
+                        "discord-daily",
+                        consecutive_failures,
+                    )
+                except Exception as notify_err:
+                    logger.exception(f"[discord-daily] 관리자 알림 발송 실패: {notify_err}")
+        finally:
+            if db:
+                db.close()
+
+        if consecutive_failures > 0:
+            await asyncio.sleep(BACKGROUND_FAST_RETRY_SECONDS)
+
+
 async def _admin_expiry_notify_loop():
     """KST 06:00·12:00·18:00·00:00 마다 7일 이내 만료 VM 어드민 알림."""
     consecutive_failures = 0
@@ -568,6 +698,8 @@ async def lifespan(app: FastAPI):
     oauth_cleanup_task = asyncio.create_task(_oauth_store_cleanup_loop())
     # 어드민 VM 만료 임박 알림 (KST 06/12/18/00시)
     expiry_notify_task = asyncio.create_task(_admin_expiry_notify_loop())
+    # Discord 일일 모니터링 리포트 (KST DISCORD_DAILY_HOUR시)
+    discord_daily_task = asyncio.create_task(_discord_daily_loop())
 
     yield
     # ── 종료 시 ──
@@ -576,6 +708,7 @@ async def lifespan(app: FastAPI):
     snapshot_task.cancel()
     oauth_cleanup_task.cancel()
     expiry_notify_task.cancel()
+    discord_daily_task.cancel()
     await serverless._http_client.aclose()
 
 
