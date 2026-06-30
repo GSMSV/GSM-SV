@@ -600,7 +600,7 @@ async def _discord_daily_loop():
 
             db = SessionLocal()
             now = now_kst()
-            report = _collect_discord_daily_report(db, now)
+            report = await asyncio.to_thread(_collect_discord_daily_report, db, now)
             message = _format_discord_daily_message(report, now)
             await _send_discord_message(message)
             logger.info("[discord-daily] 일일 모니터링 리포트 발송 완료")

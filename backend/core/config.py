@@ -1,4 +1,5 @@
 import sys
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import List
 
@@ -61,7 +62,7 @@ class Settings(BaseSettings):
 
     # Discord 모니터링 알림
     DISCORD_WEBHOOK_URL: str = ""
-    DISCORD_DAILY_HOUR: int = 9
+    DISCORD_DAILY_HOUR: int = Field(default=9, ge=0, le=23)
 
     # 내부 네트워크 (단일 서브넷)
     INTERNAL_SUBNET: str = "10.0.0"                  # /24 서브넷 프리픽스
