@@ -262,7 +262,6 @@ class TestSendDiscordMessage:
 
     @pytest.mark.asyncio
     async def test_skips_when_webhook_not_configured(self, monkeypatch):
-        from unittest.mock import AsyncMock
         import main
 
         monkeypatch.setattr(main.settings, "DISCORD_WEBHOOK_URL", "")
