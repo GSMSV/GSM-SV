@@ -570,8 +570,9 @@ def _format_discord_daily_message(report: dict, now) -> str:
         lines.append("")
         lines.append("[만료 예정 VM]")
         for vm in report["vms"]:
+            name = vm["name"] if len(vm["name"]) <= 40 else vm["name"][:37] + "..."
             lines.append(
-                f"{vm['name']}  {vm['owner_email']}  D-{vm['days_left']}  ({vm['expires_at'].strftime('%Y-%m-%d')})"
+                f"{name}  {vm['owner_email']}  D-{vm['days_left']}  ({vm['expires_at'].strftime('%Y-%m-%d')})"
             )
 
     return "\n".join(lines)
