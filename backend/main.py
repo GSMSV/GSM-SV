@@ -508,7 +508,7 @@ async def _oauth_store_cleanup_loop():
 def _collect_discord_daily_report(db, now) -> dict:
     """활성 노드 사용률 + 7일 이내 만료 VM 목록을 수집."""
     nodes = []
-    for server in db.query(Server).filter(Server.is_active == True).all():
+    for server in db.query(Server).filter(Server.is_active.is_(True)).all():
         try:
             usage = get_server_resource_usage(server)
             nodes.append({
@@ -530,6 +530,7 @@ def _collect_discord_daily_report(db, now) -> dict:
 
     soon_vms = (
         db.query(Vm)
+        .options(joinedload(Vm.owner))
         .filter(
             Vm.expires_at.isnot(None),
             Vm.expires_at > now,
@@ -542,7 +543,7 @@ def _collect_discord_daily_report(db, now) -> dict:
         {
             "name": vm.name,
             "owner_email": vm.owner.email if vm.owner else "(소유자 없음)",
-            "days_left": (vm.expires_at - now.replace(tzinfo=None)).days,
+            "days_left": (vm.expires_at - (now.replace(tzinfo=None) if vm.expires_at.tzinfo is None else now)).days,
             "expires_at": vm.expires_at,
         }
         for vm in soon_vms
@@ -604,6 +605,7 @@ async def _discord_daily_loop():
             await _send_discord_message(message)
             logger.info("[discord-daily] 일일 모니터링 리포트 발송 완료")
             consecutive_failures = 0
+            await asyncio.sleep(60)
         except Exception as e:
             if db:
                 db.rollback()
