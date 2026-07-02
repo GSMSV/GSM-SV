@@ -3,19 +3,21 @@
 
 VMID="$1" # VMID: Proxmox가 넘긴 대상 VM 번호
 PHASE="$2" # PHASE: 생애주기 단계
+MAX_RETRIES=10 # MAX_RETRIES: for문 횟수 상수
+SLEEP_SEC=5 # SLEEP_SEC: for문 대기 시간 상수
 
 if [ -z "$PHASE" ]; then
     echo "proxmox가 수집한 단계 정보가 없습니다."
     exit
 fi
 
-if [ "$PHASE" = "post-start" ]; then 
+if [ "$PHASE" = "post-start" ]; then
     echo "post-start 상태"
 
-    # guest-agent가 post-start 직후 아직 안 떴을 수 있어 최대 50회 재시도
+    # guest-agent가 post-start 직후 아직 안 떴을 수 있어 최대 10회 재시도
     success=false
 
-    for((i=1; i<=20; i++)); do
+    for((i=1; i<=MAX_RETRIES; i++)); do
         if qm guest cmd "$VMID" ping; then
             # ping 성공, agent 응답 가능 상태
             
@@ -44,7 +46,7 @@ if [ "$PHASE" = "post-start" ]; then
             success=true
             break # 검사 완료 및 loop 탈출
         fi
-        sleep 5 # agent 부팅 대기 후 다음 시도
+        sleep "$SLEEP_SEC" # agent 부팅 대기 후 다음 시도
     done
 
     if [ "$success" = false ]; then
