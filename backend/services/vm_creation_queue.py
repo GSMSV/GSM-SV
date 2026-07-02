@@ -1,4 +1,3 @@
-import json
 import logging
 import queue
 import threading
@@ -78,15 +77,25 @@ def validate_vm_creation_request(db: Session, current_user: User, vm_config: VMC
 
     if current_user.role == UserRole.USER:
         user_vm_count = db.query(Vm).filter(Vm.owner_id == current_user.id).count()
-        if user_vm_count >= settings.MAX_VMS_PER_USER:
+        active_jobs_count = db.query(VmCreationJob).filter(
+            VmCreationJob.user_id == current_user.id,
+            VmCreationJob.status.in_([
+                VMCreationJobStatus.QUEUED.value,
+                VMCreationJobStatus.RUNNING.value,
+            ]),
+        ).count()
+        if user_vm_count + active_jobs_count >= settings.MAX_VMS_PER_USER:
             raise HTTPException(
                 status_code=409,
-                detail=f"생성 가능한 최대 VM 개수({settings.MAX_VMS_PER_USER}개)를 초과했습니다.",
+                detail=(
+                    "생성 대기/진행 중인 작업을 포함하여 "
+                    f"생성 가능한 최대 VM 개수({settings.MAX_VMS_PER_USER}개)를 초과했습니다."
+                ),
             )
 
     server = (
         db.query(Server)
-        .filter(Server.name == vm_config.node_name, Server.is_active == True)
+        .filter(Server.name == vm_config.node_name, Server.is_active.is_(True))
         .first()
     )
     if not server:
@@ -101,7 +110,6 @@ def enqueue_vm_creation(db: Session, current_user: User, vm_config: VMCreate) ->
     """VM 생성 요청을 큐에 넣고 작업 정보를 반환한다."""
     validate_vm_creation_request(db, current_user, vm_config)
 
-    payload = vm_config.model_dump()
     job = VmCreationJob(
         id=str(uuid4()),
         user_id=current_user.id,
@@ -110,8 +118,8 @@ def enqueue_vm_creation(db: Session, current_user: User, vm_config: VMCreate) ->
         os=vm_config.os.value,
         node_name=vm_config.node_name,
         requested_name=vm_config.name,
-        payload_json=json.dumps(payload, ensure_ascii=False),
     )
+    job.payload = vm_config.model_dump(mode="json")
     db.add(job)
     db.commit()
     db.refresh(job)
@@ -167,11 +175,6 @@ def process_vm_creation_job(job_id: str) -> None:
             custom_disk=payload.get("custom_disk"),
         )
 
-        job = job_db.query(VmCreationJob).filter(VmCreationJob.id == job_id).first()
-        if not job:
-            logger.warning("[vm-queue] 완료 후 작업을 재조회할 수 없음: %s", job_id)
-            return
-
         job.status = VMCreationJobStatus.COMPLETED.value
         job.finished_at = now_kst()
         job.vmid = result.get("vmid")
@@ -210,7 +213,10 @@ def _worker_loop() -> None:
         try:
             if job_id == _QUEUE_STOP_SENTINEL:
                 return
-            process_vm_creation_job(job_id)
+            try:
+                process_vm_creation_job(job_id)
+            except Exception as exc:
+                logger.exception("[vm-queue] 워커 루프에서 예외 발생: %s", exc)
         finally:
             _vm_creation_queue.task_done()
 
@@ -221,6 +227,28 @@ def start_vm_creation_worker() -> None:
         if _worker_thread and _worker_thread.is_alive():
             return
         _worker_stop_event.clear()
+
+        db = SessionLocal()
+        try:
+            queued_jobs = (
+                db.query(VmCreationJob)
+                .filter(VmCreationJob.status == VMCreationJobStatus.QUEUED.value)
+                .order_by(VmCreationJob.queued_at.asc())
+                .all()
+            )
+            for job in queued_jobs:
+                _vm_creation_queue.put(job.id)
+            if queued_jobs:
+                logger.info(
+                    "[vm-queue] DB에서 %d개의 대기 작업을 큐에 재적재했습니다.",
+                    len(queued_jobs),
+                )
+        except Exception as exc:
+            logger.exception("[vm-queue] 대기 작업 재적재 중 오류 발생: %s", exc)
+        finally:
+            db.close()
+            db = None
+
         _worker_thread = threading.Thread(
             target=_worker_loop,
             name="vm-creation-worker",
@@ -238,5 +266,8 @@ def stop_vm_creation_worker() -> None:
         _worker_stop_event.set()
         _vm_creation_queue.put(_QUEUE_STOP_SENTINEL)
         _worker_thread.join(timeout=5)
-        _worker_thread = None
-        logger.info("[vm-queue] VM 생성 워커 종료")
+        if not _worker_thread.is_alive():
+            _worker_thread = None
+            logger.info("[vm-queue] VM 생성 워커 종료")
+        else:
+            logger.warning("[vm-queue] VM 생성 워커가 아직 실행 중입니다 (타임아웃).")
