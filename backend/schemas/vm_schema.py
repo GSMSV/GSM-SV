@@ -46,11 +46,11 @@ class SnapshotCreateRequest(BaseModel):
 
 
 class VMCreate(BaseModel):
-    """VM 생성 요청 모델 - 사용자는 os, tier와 선택적으로 node_name만 입력"""
+    """VM 생성 요청 모델 - 사용자는 os, tier, node_name을 입력 (node_name 필수)"""
 
     tier: VMTier = VMTier.MICRO
     os: VMOs = VMOs.UBUNTU2204
-    node_name: Optional[str] = None
+    node_name: Optional[str] = None  # 큐 경로에서 필수 검증, vm_service 직접 호출 시 None 허용
     name: Optional[str] = None
     custom_cores: Optional[int] = None
     custom_memory: Optional[int] = None

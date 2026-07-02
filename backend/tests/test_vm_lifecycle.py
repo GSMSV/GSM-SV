@@ -822,6 +822,28 @@ class TestVMCreationQueue:
         result_admin = get_vm_creation_job(db=db, job_id=queued.job_id, current_user=admin_user)
         assert result_admin.job_id == queued.job_id
 
+    def test_job_access_denied_for_other_user(self, db, user, server):
+        """다른 일반 사용자는 타인의 잡에 접근할 수 없다 (404 반환)."""
+        import pytest
+        from fastapi import HTTPException as FastAPIHTTPException
+
+        other_user = User(
+            email="other@gsm.hs.kr",
+            hashed_password="hashed",
+            role=UserRole.USER,
+            is_active=True,
+        )
+        db.add(other_user)
+        db.commit()
+        db.refresh(other_user)
+
+        vm_config = VMCreate(tier=VMTier.MICRO, node_name=server.name, name="private-vm")
+        queued = enqueue_vm_creation(db=db, current_user=user, vm_config=vm_config)
+
+        with pytest.raises(FastAPIHTTPException) as exc_info:
+            get_vm_creation_job(db=db, job_id=queued.job_id, current_user=other_user)
+        assert exc_info.value.status_code == 404
+
     def test_queue_position_is_deterministic_for_same_timestamp(self, db, user, server):
         queued_at = now_kst()
         first_job = VmCreationJob(
