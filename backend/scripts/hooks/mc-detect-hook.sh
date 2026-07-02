@@ -17,7 +17,7 @@ if [ "$PHASE" = "post-start" ]; then
     # guest-agent가 post-start 직후 아직 안 떴을 수 있어 최대 10회 재시도
     success=false
 
-    for((i=1; i<=MAX_RETRIES; i++)); do
+    for((i=1; i<=$MAX_RETRIES; i++)); do
         if qm guest cmd "$VMID" ping; then
             # ping 성공, agent 응답 가능 상태
             
