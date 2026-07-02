@@ -213,7 +213,6 @@ def process_vm_creation_job(job_id: str) -> None:
             logger.warning("[vm-queue] 작업을 찾을 수 없음: %s", job_id)
             return
 
-        # 멱등성 보장: vmid가 이미 설정된 경우 VM이 이미 생성된 것으로 간주
         if job.vmid is not None:
             logger.warning("[vm-queue] 작업 %s에 vmid %s가 이미 설정되어 있음, 중복 생성 방지", job_id, job.vmid)
             job.status = VMCreationJobStatus.COMPLETED.value
