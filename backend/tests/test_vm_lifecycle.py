@@ -23,6 +23,8 @@ from services.vm_creation_queue import (
     enqueue_vm_creation,
     get_vm_creation_job,
     _get_queue_position,
+    _next_job_id,
+    _recover_pending_jobs,
     process_vm_creation_job,
 )
 from services.vm_service import (
@@ -851,3 +853,49 @@ class TestVMCreationQueue:
 
         assert _get_queue_position(db, first_job) == 1
         assert _get_queue_position(db, second_job) == 2
+
+    def test_next_job_id_is_monotonic(self):
+        first_id = _next_job_id()
+        second_id = _next_job_id()
+
+        assert first_id != second_id
+        assert first_id < second_id
+
+    def test_recover_pending_jobs_requeues_running_jobs(self, db, user, server):
+        queued_job = VmCreationJob(
+            id="00000000-0000-0000-0000-000000000010",
+            user_id=user.id,
+            status=VMCreationJobStatus.QUEUED.value,
+            tier=VMTier.MICRO.value,
+            os="ubuntu2204",
+            node_name=server.name,
+            requested_name="queued",
+            queued_at=now_kst(),
+        )
+        queued_job.payload = {"tier": VMTier.MICRO.value, "os": "ubuntu2204", "node_name": server.name, "name": "queued"}
+
+        running_job = VmCreationJob(
+            id="00000000-0000-0000-0000-000000000011",
+            user_id=user.id,
+            status=VMCreationJobStatus.RUNNING.value,
+            tier=VMTier.MICRO.value,
+            os="ubuntu2204",
+            node_name=server.name,
+            requested_name="running",
+            queued_at=now_kst(),
+            started_at=now_kst(),
+        )
+        running_job.payload = {"tier": VMTier.MICRO.value, "os": "ubuntu2204", "node_name": server.name, "name": "running"}
+
+        db.add_all([queued_job, running_job])
+        db.commit()
+
+        recovered = _recover_pending_jobs(db)
+
+        db.refresh(queued_job)
+        db.refresh(running_job)
+
+        assert [job.id for job in recovered] == [queued_job.id, running_job.id]
+        assert queued_job.status == VMCreationJobStatus.QUEUED.value
+        assert running_job.status == VMCreationJobStatus.QUEUED.value
+        assert running_job.started_at is None
