@@ -1,0 +1,242 @@
+import json
+import logging
+import queue
+import threading
+from typing import Optional
+from uuid import uuid4
+
+from fastapi import HTTPException
+from sqlalchemy.orm import Session
+
+from core.config import settings
+from core.database import SessionLocal
+from core.timezone import now_kst
+from models.server import Server
+from models.user import User, UserRole
+from models.vm import Vm
+from models.vm_creation_job import VmCreationJob
+from schemas.vm_schema import VMCreate, VMCreationJobResponse, VMCreationJobStatus, VMOs, VMTier
+from services.vm_service import create_vm
+
+logger = logging.getLogger(__name__)
+
+_QUEUE_STOP_SENTINEL = "__STOP__"
+_vm_creation_queue: "queue.Queue[str]" = queue.Queue()
+_worker_thread: Optional[threading.Thread] = None
+_worker_lock = threading.Lock()
+_worker_stop_event = threading.Event()
+
+
+def _serialize_job(job: VmCreationJob, position: int | None = None) -> VMCreationJobResponse:
+    return VMCreationJobResponse(
+        job_id=job.id,
+        status=VMCreationJobStatus(job.status),
+        position=position,
+        requested_at=job.queued_at,
+        started_at=job.started_at,
+        finished_at=job.finished_at,
+        vmid=job.vmid,
+        node_name=job.node_name,
+        message=job.message,
+        error_message=job.error_message,
+        result=job.result,
+    )
+
+
+def _get_queue_position(db: Session, job: VmCreationJob) -> int | None:
+    if job.status != VMCreationJobStatus.QUEUED.value:
+        return None
+    return (
+        db.query(VmCreationJob)
+        .filter(
+            VmCreationJob.status == VMCreationJobStatus.QUEUED.value,
+            VmCreationJob.queued_at <= job.queued_at,
+        )
+        .count()
+    )
+
+
+def validate_vm_creation_request(db: Session, current_user: User, vm_config: VMCreate) -> Server:
+    """큐에 넣기 전에 최소한의 선검증만 수행한다."""
+    if not vm_config.node_name:
+        raise HTTPException(status_code=400, detail="node_name을 지정해 주세요.")
+
+    if current_user.role == UserRole.USER and vm_config.node_name == settings.PROJECT_NODE_NAME:
+        raise HTTPException(
+            status_code=403,
+            detail="일반 사용자는 프로젝트 전용 노드에 VM을 생성할 수 없습니다.",
+        )
+
+    if vm_config.tier == VMTier.PROJECT_CUSTOM and current_user.role not in (
+        UserRole.ADMIN,
+        UserRole.PROJECT_OWNER,
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="프로젝트 커스텀 티어는 프로젝트 오너만 사용할 수 있습니다.",
+        )
+
+    if current_user.role == UserRole.USER:
+        user_vm_count = db.query(Vm).filter(Vm.owner_id == current_user.id).count()
+        if user_vm_count >= settings.MAX_VMS_PER_USER:
+            raise HTTPException(
+                status_code=409,
+                detail=f"생성 가능한 최대 VM 개수({settings.MAX_VMS_PER_USER}개)를 초과했습니다.",
+            )
+
+    server = (
+        db.query(Server)
+        .filter(Server.name == vm_config.node_name, Server.is_active == True)
+        .first()
+    )
+    if not server:
+        raise HTTPException(
+            status_code=404,
+            detail=f"노드 '{vm_config.node_name}'을(를) 찾을 수 없거나 비활성 상태입니다.",
+        )
+    return server
+
+
+def enqueue_vm_creation(db: Session, current_user: User, vm_config: VMCreate) -> VMCreationJobResponse:
+    """VM 생성 요청을 큐에 넣고 작업 정보를 반환한다."""
+    validate_vm_creation_request(db, current_user, vm_config)
+
+    payload = vm_config.model_dump()
+    job = VmCreationJob(
+        id=str(uuid4()),
+        user_id=current_user.id,
+        status=VMCreationJobStatus.QUEUED.value,
+        tier=vm_config.tier.value,
+        os=vm_config.os.value,
+        node_name=vm_config.node_name,
+        requested_name=vm_config.name,
+        payload_json=json.dumps(payload, ensure_ascii=False),
+    )
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+
+    _vm_creation_queue.put(job.id)
+    return _serialize_job(job, position=_get_queue_position(db, job))
+
+
+def get_vm_creation_job(db: Session, job_id: str, current_user: User) -> VMCreationJobResponse:
+    job = db.query(VmCreationJob).filter(VmCreationJob.id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="VM 생성 작업을 찾을 수 없습니다.")
+
+    if current_user.role != UserRole.ADMIN and job.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail="VM 생성 작업을 찾을 수 없습니다.")
+
+    return _serialize_job(job, position=_get_queue_position(db, job))
+
+
+def process_vm_creation_job(job_id: str) -> None:
+    """큐에서 꺼낸 단일 작업을 처리한다."""
+    job_db = SessionLocal()
+    work_db = SessionLocal()
+    try:
+        job = job_db.query(VmCreationJob).filter(VmCreationJob.id == job_id).first()
+        if not job:
+            logger.warning("[vm-queue] 작업을 찾을 수 없음: %s", job_id)
+            return
+
+        if job.status != VMCreationJobStatus.QUEUED.value:
+            logger.info("[vm-queue] 작업 %s는 이미 처리된 상태(%s)라 건너뜀", job_id, job.status)
+            return
+
+        job.status = VMCreationJobStatus.RUNNING.value
+        job.started_at = now_kst()
+        job.attempts += 1
+        job_db.commit()
+
+        payload = job.payload
+        user = work_db.query(User).filter(User.id == job.user_id).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="작업 소유자를 찾을 수 없습니다.")
+
+        result = create_vm(
+            db=work_db,
+            current_user=user,
+            tier=VMTier(payload["tier"]),
+            os=VMOs(payload["os"]),
+            node_name=payload.get("node_name"),
+            name=payload.get("name"),
+            custom_cores=payload.get("custom_cores"),
+            custom_memory=payload.get("custom_memory"),
+            custom_disk=payload.get("custom_disk"),
+        )
+
+        job = job_db.query(VmCreationJob).filter(VmCreationJob.id == job_id).first()
+        if not job:
+            logger.warning("[vm-queue] 완료 후 작업을 재조회할 수 없음: %s", job_id)
+            return
+
+        job.status = VMCreationJobStatus.COMPLETED.value
+        job.finished_at = now_kst()
+        job.vmid = result.get("vmid")
+        job.node_name = result.get("assigned_node") or job.node_name
+        job.message = result.get("message")
+        job.result = result
+        job.error_message = None
+        job_db.commit()
+        logger.info("[vm-queue] 작업 완료: %s -> VMID %s", job_id, job.vmid)
+    except Exception as exc:
+        logger.exception("[vm-queue] 작업 실패: %s", job_id)
+        try:
+            job_db.rollback()
+            job = job_db.query(VmCreationJob).filter(VmCreationJob.id == job_id).first()
+            if job:
+                job.status = VMCreationJobStatus.FAILED.value
+                job.finished_at = now_kst()
+                job.error_message = getattr(exc, "detail", None) or str(exc)
+                job.message = "VM 생성에 실패했습니다."
+                job_db.commit()
+        except Exception:
+            job_db.rollback()
+            logger.exception("[vm-queue] 실패 상태 기록 중 오류: %s", job_id)
+    finally:
+        work_db.close()
+        job_db.close()
+
+
+def _worker_loop() -> None:
+    while not _worker_stop_event.is_set():
+        try:
+            job_id = _vm_creation_queue.get(timeout=1)
+        except queue.Empty:
+            continue
+
+        try:
+            if job_id == _QUEUE_STOP_SENTINEL:
+                return
+            process_vm_creation_job(job_id)
+        finally:
+            _vm_creation_queue.task_done()
+
+
+def start_vm_creation_worker() -> None:
+    global _worker_thread
+    with _worker_lock:
+        if _worker_thread and _worker_thread.is_alive():
+            return
+        _worker_stop_event.clear()
+        _worker_thread = threading.Thread(
+            target=_worker_loop,
+            name="vm-creation-worker",
+            daemon=True,
+        )
+        _worker_thread.start()
+        logger.info("[vm-queue] VM 생성 워커 시작")
+
+
+def stop_vm_creation_worker() -> None:
+    global _worker_thread
+    with _worker_lock:
+        if not _worker_thread or not _worker_thread.is_alive():
+            return
+        _worker_stop_event.set()
+        _vm_creation_queue.put(_QUEUE_STOP_SENTINEL)
+        _worker_thread.join(timeout=5)
+        _worker_thread = None
+        logger.info("[vm-queue] VM 생성 워커 종료")

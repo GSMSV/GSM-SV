@@ -15,8 +15,14 @@ from models.server import Server
 from models.vm import Vm
 from models.vm_port import VmPort
 from models.notification import Notification
-from schemas.vm_schema import VMCreate, VMTier, SnapshotCreateRequest
+from schemas.vm_schema import VMCreate, VMCreationJobStatus, VMTier, SnapshotCreateRequest
 from api.routes.vmcontrol import create_snapshot
+from models.vm_creation_job import VmCreationJob
+from services.vm_creation_queue import (
+    enqueue_vm_creation,
+    get_vm_creation_job,
+    process_vm_creation_job,
+)
 from services.vm_service import (
     create_vm,
     delete_vm,
@@ -764,3 +770,50 @@ class TestSnapshotCreation:
         )
 
         assert result["success"] is True
+
+
+class TestVMCreationQueue:
+    """VM 생성 큐 동작 검증"""
+
+    @patch("services.vm_creation_queue.create_vm")
+    @patch("services.vm_creation_queue.SessionLocal", new=TestSession)
+    def test_enqueue_and_process_job(self, mock_create_vm, db, user, server):
+        vm_config = VMCreate(tier=VMTier.MICRO, node_name=server.name, name="queued-vm")
+
+        queued = enqueue_vm_creation(db=db, current_user=user, vm_config=vm_config)
+        assert queued.status == VMCreationJobStatus.QUEUED
+        assert queued.position == 1
+
+        job = db.query(VmCreationJob).filter(VmCreationJob.id == queued.job_id).first()
+        assert job is not None
+        assert job.status == "queued"
+
+        mock_create_vm.return_value = {
+            "success": True,
+            "message": "VM queued-vm(301)가 노드 'test-node'에 생성되었습니다.",
+            "assigned_node": server.name,
+            "vmid": 301,
+            "name": "queued-vm",
+            "tier": "micro",
+            "internal_ip": "10.0.0.150",
+            "ssh_user": "ubuntu",
+            "ssh_password": "secret",
+        }
+
+        process_vm_creation_job(queued.job_id)
+
+        db.refresh(job)
+        assert job.status == "completed"
+        assert job.vmid == 301
+        assert job.result["vmid"] == 301
+        assert job.message is not None
+
+    def test_job_access_is_owner_only_or_admin(self, db, user, admin_user, server):
+        vm_config = VMCreate(tier=VMTier.MICRO, node_name=server.name, name="owner-vm")
+        queued = enqueue_vm_creation(db=db, current_user=user, vm_config=vm_config)
+
+        result = get_vm_creation_job(db=db, job_id=queued.job_id, current_user=user)
+        assert result.job_id == queued.job_id
+
+        result_admin = get_vm_creation_job(db=db, job_id=queued.job_id, current_user=admin_user)
+        assert result_admin.job_id == queued.job_id
