@@ -9,6 +9,7 @@ from unittest.mock import patch, MagicMock
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+from core.timezone import now_kst
 from core.database import Base
 from models.user import User, UserRole
 from models.server import Server
@@ -21,6 +22,7 @@ from models.vm_creation_job import VmCreationJob
 from services.vm_creation_queue import (
     enqueue_vm_creation,
     get_vm_creation_job,
+    _get_queue_position,
     process_vm_creation_job,
 )
 from services.vm_service import (
@@ -817,3 +819,35 @@ class TestVMCreationQueue:
 
         result_admin = get_vm_creation_job(db=db, job_id=queued.job_id, current_user=admin_user)
         assert result_admin.job_id == queued.job_id
+
+    def test_queue_position_is_deterministic_for_same_timestamp(self, db, user, server):
+        queued_at = now_kst()
+        first_job = VmCreationJob(
+            id="00000000-0000-0000-0000-000000000001",
+            user_id=user.id,
+            status=VMCreationJobStatus.QUEUED.value,
+            tier=VMTier.MICRO.value,
+            os="ubuntu2204",
+            node_name=server.name,
+            requested_name="first",
+            queued_at=queued_at,
+        )
+        first_job.payload = {"tier": VMTier.MICRO.value, "os": "ubuntu2204", "node_name": server.name, "name": "first"}
+
+        second_job = VmCreationJob(
+            id="00000000-0000-0000-0000-000000000002",
+            user_id=user.id,
+            status=VMCreationJobStatus.QUEUED.value,
+            tier=VMTier.MICRO.value,
+            os="ubuntu2204",
+            node_name=server.name,
+            requested_name="second",
+            queued_at=queued_at,
+        )
+        second_job.payload = {"tier": VMTier.MICRO.value, "os": "ubuntu2204", "node_name": server.name, "name": "second"}
+
+        db.add_all([first_job, second_job])
+        db.commit()
+
+        assert _get_queue_position(db, first_job) == 1
+        assert _get_queue_position(db, second_job) == 2

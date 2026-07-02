@@ -5,6 +5,7 @@ from typing import Optional
 from uuid import uuid4
 
 from fastapi import HTTPException
+from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
 
 from core.config import settings
@@ -49,7 +50,13 @@ def _get_queue_position(db: Session, job: VmCreationJob) -> int | None:
         db.query(VmCreationJob)
         .filter(
             VmCreationJob.status == VMCreationJobStatus.QUEUED.value,
-            VmCreationJob.queued_at <= job.queued_at,
+            or_(
+                VmCreationJob.queued_at < job.queued_at,
+                and_(
+                    VmCreationJob.queued_at == job.queued_at,
+                    VmCreationJob.id <= job.id,
+                ),
+            ),
         )
         .count()
     )
@@ -144,19 +151,32 @@ def process_vm_creation_job(job_id: str) -> None:
     job_db = SessionLocal()
     work_db = SessionLocal()
     try:
+        claimed_at = now_kst()
+        claimed_rows = (
+            job_db.query(VmCreationJob)
+            .filter(
+                VmCreationJob.id == job_id,
+                VmCreationJob.status == VMCreationJobStatus.QUEUED.value,
+            )
+            .update(
+                {
+                    VmCreationJob.status: VMCreationJobStatus.RUNNING.value,
+                    VmCreationJob.started_at: claimed_at,
+                    VmCreationJob.attempts: VmCreationJob.attempts + 1,
+                },
+                synchronize_session=False,
+            )
+        )
+        if claimed_rows == 0:
+            job_db.rollback()
+            logger.info("[vm-queue] 작업 %s는 이미 다른 워커가 처리했거나 상태가 변경됨", job_id)
+            return
+        job_db.commit()
+
         job = job_db.query(VmCreationJob).filter(VmCreationJob.id == job_id).first()
         if not job:
             logger.warning("[vm-queue] 작업을 찾을 수 없음: %s", job_id)
             return
-
-        if job.status != VMCreationJobStatus.QUEUED.value:
-            logger.info("[vm-queue] 작업 %s는 이미 처리된 상태(%s)라 건너뜀", job_id, job.status)
-            return
-
-        job.status = VMCreationJobStatus.RUNNING.value
-        job.started_at = now_kst()
-        job.attempts += 1
-        job_db.commit()
 
         payload = job.payload
         user = work_db.query(User).filter(User.id == job.user_id).first()
