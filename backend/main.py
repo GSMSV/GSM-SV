@@ -235,16 +235,27 @@ async def _expire_vms_loop():
                     logger.info(
                         f"[expire] 만료 VM 삭제: {vm.name} (VMID {vm.hypervisor_vmid})"
                     )
-                    # 만료 삭제 알림 생성
+                    # 만료 삭제 알림 생성 (삭제 반복 실패 시 중복 방지)
                     if vm.owner_id:
-                        db.add(
-                            Notification(
-                                user_id=vm.owner_id,
-                                type="error",
-                                message=f"VM '{vm.name}'이(가) 만료되어 자동 삭제되었습니다.",
+                        existing = (
+                            db.query(Notification)
+                            .filter(
+                                Notification.user_id == vm.owner_id,
+                                Notification.message.contains(f"'{vm.name}'"),
+                                Notification.message.contains("자동 삭제되었습니다"),
+                                Notification.created_at >= vm.expires_at,
                             )
+                            .first()
                         )
-                        db.commit()
+                        if not existing:
+                            db.add(
+                                Notification(
+                                    user_id=vm.owner_id,
+                                    type="error",
+                                    message=f"VM '{vm.name}'이(가) 만료되어 자동 삭제되었습니다.",
+                                )
+                            )
+                            db.commit()
                     delete_vm(db, vm, purge=True)
                 except Exception as e:
                     logger.error(f"[expire] VM {vm.hypervisor_vmid} 삭제 실패: {e}")
