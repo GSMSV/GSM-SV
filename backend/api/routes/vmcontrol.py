@@ -451,6 +451,19 @@ async def control_vm(
 ):
     """VM 전원 제어 (시작/중지/재시작) — 소유자 또는 관리자만 가능"""
     vm_record = get_vm_with_owner_check(db, vmid, current_user, node)
+
+    # 만료 유예 기간 VM은 시작/재시작 차단 (관리자 제외) — 연장 시 자동 해제
+    if (
+        action.action in ("start", "reboot")
+        and vm_record.expires_at
+        and vm_record.expires_at <= now_kst()
+        and current_user.role != UserRole.ADMIN
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="만료된 VM은 시작할 수 없습니다. 기간 연장 후 이용해주세요.",
+        )
+
     node = vm_record.server.name
     proxmox = get_proxmox_for_server(vm_record.server)
 
