@@ -9,11 +9,12 @@ from core.timezone import now_kst
 from fastapi import APIRouter, HTTPException, status, Depends, Request
 from sqlalchemy import text
 from sqlalchemy.orm import Session
-from schemas.vm_schema import VMAction, VMCreate, VMResize, SnapshotCreateRequest
+from schemas.vm_schema import VMAction, VMCreate, VMCreationJobResponse, VMResize, SnapshotCreateRequest
 from core.constants import AUTO_SNAP_PREFIX, PROVISIONING_UPTIME_THRESHOLD_SECONDS
 from services.proxmox_client import get_proxmox_for_server, raise_proxmox_http_exception
 from models.server import Server
-from services.vm_service import create_vm, delete_vm
+from services.vm_creation_queue import enqueue_vm_creation, get_vm_creation_job
+from services.vm_service import delete_vm
 from core.database import get_db
 from models.vm import Vm
 from models.user import User, UserRole
@@ -487,7 +488,7 @@ async def control_vm(
         raise_proxmox_http_exception(e, default_detail="서버 오류가 발생했습니다.")
 
 
-@router.post("/create", status_code=status.HTTP_201_CREATED)
+@router.post("/create", status_code=status.HTTP_202_ACCEPTED, response_model=VMCreationJobResponse)
 @limiter.limit("5/minute")
 async def create_vm_endpoint(
     request: Request,
@@ -495,21 +496,21 @@ async def create_vm_endpoint(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """새로운 VM 생성 (Auto-Provisioning 적용)"""
-    return create_vm(
-        db=db,
-        current_user=current_user,
-        tier=vm_config.tier,
-        os=vm_config.os,
-        node_name=vm_config.node_name,
-        name=vm_config.name,
-        custom_cores=vm_config.custom_cores,
-        custom_memory=vm_config.custom_memory,
-        custom_disk=vm_config.custom_disk,
-    )
+    """VM 생성 요청을 큐에 넣는다."""
+    return enqueue_vm_creation(db=db, current_user=current_user, vm_config=vm_config)
 
 
 # ── 스냅샷 관리 ─────────────────────────────────────────────
+
+
+@router.get("/jobs/{job_id}", response_model=VMCreationJobResponse)
+async def get_vm_creation_job_status(
+    job_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """VM 생성 큐 작업 상태를 조회한다."""
+    return get_vm_creation_job(db=db, job_id=job_id, current_user=current_user)
 
 
 @router.get("/{node}/vms/{vmid}/snapshots")

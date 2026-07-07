@@ -33,6 +33,8 @@ from models.notification import Notification
 from models.user import User, UserRole
 from models.server import Server
 from services.mon_service import get_server_resource_usage
+from models.vm_creation_job import VmCreationJob  # noqa: F401
+from services.vm_creation_queue import start_vm_creation_worker, stop_vm_creation_worker
 from models.faq_question import FaqQuestion  # noqa: F401 — create_all 자동 반영
 from models.vm_port import VmPort  # noqa: F401 — create_all 자동 반영
 
@@ -761,6 +763,7 @@ async def lifespan(app: FastAPI):
     expiry_notify_task = asyncio.create_task(_admin_expiry_notify_loop())
     # Discord 일일 모니터링 리포트 (KST DISCORD_DAILY_HOUR시)
     discord_daily_task = asyncio.create_task(_discord_daily_loop())
+    start_vm_creation_worker()
 
     yield
     # ── 종료 시 ──
@@ -770,6 +773,7 @@ async def lifespan(app: FastAPI):
     oauth_cleanup_task.cancel()
     expiry_notify_task.cancel()
     discord_daily_task.cancel()
+    stop_vm_creation_worker()
     await serverless._http_client.aclose()
 
 
