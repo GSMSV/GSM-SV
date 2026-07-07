@@ -2,7 +2,7 @@
 
 import pytest
 from datetime import datetime, timedelta
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -162,9 +162,10 @@ def _make_admin(db, email):
     return u
 
 
-def _make_vm(db, name, server, expires_at):
-    v = Vm(hypervisor_vmid=100, name=name, server_id=server.id,
-           allocated_ram_mb=2048, allocated_cores=2, expires_at=expires_at)
+def _make_vm(db, name, server, expires_at, owner=None, vmid=100):
+    v = Vm(hypervisor_vmid=vmid, name=name, server_id=server.id,
+           allocated_ram_mb=2048, allocated_cores=2, expires_at=expires_at,
+           owner_id=owner.id if owner else None)
     db.add(v)
     db.flush()
     return v
@@ -265,3 +266,146 @@ class TestSendAdminExpiryNotifications:
 
         db.expire_all()
         assert db.query(Notification).filter(Notification.user_id == admin.id).count() == 1
+
+
+def _mock_proxmox(status="running"):
+    m = MagicMock()
+    m.nodes.return_value.qemu.return_value.status.current.get.return_value = {
+        "status": status
+    }
+    return m
+
+
+def _stop_post(m):
+    return m.nodes.return_value.qemu.return_value.status.stop.post
+
+
+class TestProcessGraceVms:
+    """_process_grace_vms 단위 테스트 — 만료 3일 유예 정지 + 알림."""
+
+    def test_grace_vm_stopped_and_notified(self, db):
+        """만료 직후 VM은 삭제 없이 정지되고 '3일 후 완전 삭제' 알림 1건 발송."""
+        from main import _process_grace_vms
+        now = datetime(2026, 5, 26, 12, 0, 0)
+        server = _make_server(db)
+        owner = _make_admin(db, "owner@gsm.hs.kr")
+        _make_vm(db, "grace-vm", server, now - timedelta(hours=1), owner=owner)
+        db.commit()
+
+        proxmox = _mock_proxmox("running")
+        with patch("services.proxmox_client.get_proxmox_for_server", return_value=proxmox):
+            _process_grace_vms(db, now)
+
+        _stop_post(proxmox).assert_called_once()
+        db.expire_all()
+        assert db.query(Vm).count() == 1  # 삭제되지 않음
+        notifs = db.query(Notification).filter(Notification.user_id == owner.id).all()
+        assert len(notifs) == 1
+        assert "3일 후 완전 삭제" in notifs[0].message
+        assert "'grace-vm'" in notifs[0].message
+
+    def test_notification_not_duplicated_on_rerun(self, db):
+        """같은 유예 기간 내 루프 재실행 시 알림이 중복 생성되지 않는다."""
+        from main import _process_grace_vms
+        now = datetime(2026, 5, 26, 12, 0, 0)
+        server = _make_server(db)
+        owner = _make_admin(db, "owner2@gsm.hs.kr")
+        _make_vm(db, "rerun-vm", server, now - timedelta(hours=1), owner=owner)
+        db.commit()
+
+        proxmox = _mock_proxmox("stopped")
+        with patch("services.proxmox_client.get_proxmox_for_server", return_value=proxmox):
+            _process_grace_vms(db, now)
+            _process_grace_vms(db, now + timedelta(hours=1))
+
+        db.expire_all()
+        assert db.query(Notification).filter(Notification.user_id == owner.id).count() == 1
+
+    def test_already_stopped_vm_not_stopped_again(self, db):
+        """이미 정지된 VM에는 stop 호출하지 않는다."""
+        from main import _process_grace_vms
+        now = datetime(2026, 5, 26, 12, 0, 0)
+        server = _make_server(db)
+        owner = _make_admin(db, "owner3@gsm.hs.kr")
+        _make_vm(db, "stopped-vm", server, now - timedelta(hours=1), owner=owner)
+        db.commit()
+
+        proxmox = _mock_proxmox("stopped")
+        with patch("services.proxmox_client.get_proxmox_for_server", return_value=proxmox):
+            _process_grace_vms(db, now)
+
+        _stop_post(proxmox).assert_not_called()
+
+    def test_vm_past_grace_excluded(self, db):
+        """만료 3일 경과 VM은 유예 대상이 아니다 (삭제 단계에서 처리)."""
+        from main import _process_grace_vms
+        now = datetime(2026, 5, 26, 12, 0, 0)
+        server = _make_server(db)
+        owner = _make_admin(db, "owner4@gsm.hs.kr")
+        _make_vm(db, "old-vm", server, now - timedelta(days=3, hours=1), owner=owner)
+        db.commit()
+
+        proxmox = _mock_proxmox("running")
+        with patch("services.proxmox_client.get_proxmox_for_server", return_value=proxmox):
+            _process_grace_vms(db, now)
+
+        _stop_post(proxmox).assert_not_called()
+        assert db.query(Notification).count() == 0
+
+    def test_extended_vm_excluded(self, db):
+        """연장 등으로 expires_at이 미래인 VM은 유예 대상이 아니다."""
+        from main import _process_grace_vms
+        now = datetime(2026, 5, 26, 12, 0, 0)
+        server = _make_server(db)
+        owner = _make_admin(db, "owner5@gsm.hs.kr")
+        _make_vm(db, "future-vm", server, now + timedelta(days=30), owner=owner)
+        db.commit()
+
+        proxmox = _mock_proxmox("running")
+        with patch("services.proxmox_client.get_proxmox_for_server", return_value=proxmox):
+            _process_grace_vms(db, now)
+
+        _stop_post(proxmox).assert_not_called()
+        assert db.query(Notification).count() == 0
+
+    def test_owner_none_stops_without_notification(self, db):
+        """소유자 없는 VM도 정지는 되고 알림만 생략된다."""
+        from main import _process_grace_vms
+        now = datetime(2026, 5, 26, 12, 0, 0)
+        server = _make_server(db)
+        _make_vm(db, "orphan-vm", server, now - timedelta(hours=1))
+        db.commit()
+
+        proxmox = _mock_proxmox("running")
+        with patch("services.proxmox_client.get_proxmox_for_server", return_value=proxmox):
+            _process_grace_vms(db, now)
+
+        _stop_post(proxmox).assert_called_once()
+        assert db.query(Notification).count() == 0
+
+    def test_substring_vm_name_not_suppressed(self, db):
+        """다른 VM('app2') 알림이 있어도 이름이 부분 문자열인 VM('app')의 알림은 발송된다."""
+        from main import _process_grace_vms
+        now = datetime(2026, 5, 26, 12, 0, 0)
+        server = _make_server(db)
+        owner = _make_admin(db, "owner6@gsm.hs.kr")
+        _make_vm(db, "app", server, now - timedelta(hours=1), owner=owner)
+        db.add(Notification(
+            user_id=owner.id,
+            type="error",
+            message="VM 'app2'이(가) 만료되어 정지되었습니다. 3일 후 완전 삭제됩니다.",
+            created_at=now,
+        ))
+        db.commit()
+
+        proxmox = _mock_proxmox("stopped")
+        with patch("services.proxmox_client.get_proxmox_for_server", return_value=proxmox):
+            _process_grace_vms(db, now)
+
+        db.expire_all()
+        assert (
+            db.query(Notification)
+            .filter(Notification.message.contains("'app'"))
+            .count()
+            == 1
+        )
