@@ -153,10 +153,11 @@ limiter = Limiter(key_func=get_remote_address)
 
 
 async def _expire_vms_loop():
-    """만료된 VM 삭제 + 만료 임박 알림 + 오래된 알림 정리 (1시간 간격)"""
+    """만료 유예 정지 + 만료 3일 경과 VM 삭제 + 만료 임박 알림 + 오래된 알림 정리 (1시간 간격)"""
     from services.vm_service import delete_vm
-    from datetime import timedelta
+    from services.proxmox_client import get_proxmox_for_server
 
+    EXPIRE_GRACE_DAYS = 3
     consecutive_failures = 0
     while True:
         db = None
@@ -164,12 +165,54 @@ async def _expire_vms_loop():
             db = SessionLocal()
             now = now_kst()
 
-            # 1. 만료된 VM 삭제
-            expired_vms = (
+            # 1. 유예 기간 진입 VM 강제 정지 (만료 ~ 만료+3일)
+            grace_vms = (
                 db.query(Vm)
                 .filter(
                     Vm.expires_at.isnot(None),
                     Vm.expires_at <= now,
+                    Vm.expires_at > now - timedelta(days=EXPIRE_GRACE_DAYS),
+                )
+                .all()
+            )
+
+            for vm in grace_vms:
+                try:
+                    proxmox = get_proxmox_for_server(vm.server)
+                    vmid = vm.hypervisor_vmid
+                    vm_status = proxmox.nodes(vm.server.name).qemu(vmid).status.current.get()
+                    if vm_status.get("status") == "running":
+                        proxmox.nodes(vm.server.name).qemu(vmid).status.stop.post()
+
+                    if vm.owner_id:
+                        existing = (
+                            db.query(Notification)
+                            .filter(
+                                Notification.user_id == vm.owner_id,
+                                Notification.message.contains(vm.name),
+                                Notification.message.contains("3일 후 완전 삭제"),
+                                Notification.created_at >= vm.expires_at,
+                            )
+                            .first()
+                        )
+                        if not existing:
+                            db.add(
+                                Notification(
+                                    user_id=vm.owner_id,
+                                    type="error",
+                                    message=f"VM '{vm.name}'이(가) 만료되어 정지되었습니다. 3일 후 완전 삭제됩니다.",
+                                )
+                            )
+                            db.commit()
+                except Exception as e:
+                    logger.error(f"[expire] VM {vm.hypervisor_vmid} 유예 정지 실패: {e}")
+
+            # 2. 만료 3일 경과 VM 삭제
+            expired_vms = (
+                db.query(Vm)
+                .filter(
+                    Vm.expires_at.isnot(None),
+                    Vm.expires_at <= now - timedelta(days=EXPIRE_GRACE_DAYS),
                 )
                 .all()
             )
@@ -193,7 +236,7 @@ async def _expire_vms_loop():
                 except Exception as e:
                     logger.error(f"[expire] VM {vm.hypervisor_vmid} 삭제 실패: {e}")
 
-            # 2. 만료 임박(15일 이내) VM 알림 (하루 1회)
+            # 3. 만료 임박(15일 이내) VM 알림 (하루 1회)
             soon_vms = (
                 db.query(Vm)
                 .filter(
@@ -230,7 +273,7 @@ async def _expire_vms_loop():
                     )
             db.commit()
 
-            # 3. 15일 지난 알림 자동 삭제
+            # 4. 15일 지난 알림 자동 삭제
             cutoff = now - timedelta(days=15)
             db.query(Notification).filter(
                 Notification.created_at < cutoff,
