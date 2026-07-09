@@ -1,10 +1,12 @@
 #!/bin/bash
+set -uo pipefail
 
-# hookscript 
+# hookscript
 VMID="$1" # VMID: Proxmox가 넘긴 대상 VM 번호
 PHASE="$2" # PHASE: 생애주기 단계
 MAX_RETRIES=10 # MAX_RETRIES: for문 횟수 상수
 SLEEP_SEC=5 # SLEEP_SEC: for문 대기 시간 상수
+
 
 if [ -z "$PHASE" ]; then
     echo "proxmox가 수집한 단계 정보가 없습니다."
@@ -12,6 +14,13 @@ if [ -z "$PHASE" ]; then
 fi
 
 if [ "$PHASE" = "post-start" ]; then
+    WEBHOOK_URL=$(cat /etc/mc-detect/webhook 2>/dev/null)
+    message="$VMID 에서 마인크래프트 서버가 발견되었습니다"
+
+    if [ -z "$WEBHOOK_URL" ]; then
+        echo "WEBHOOK URL이 NULL 이거나 문자열의 길이가 0 입니다."
+        exit 0
+    fi
     echo "post-start 상태"
 
     # guest-agent가 post-start 직후 아직 안 떴을 수 있어 최대 10회 재시도
@@ -35,8 +44,6 @@ if [ "$PHASE" = "post-start" ]; then
                         echo "검사 할 폴더가 없습니다." >&2 # stderr로 전송
                         exit 0
                 fi
-                
-                # find의 에러는 out-data가 아닌 err-data로 분리되므로 JSON 파싱에 영향 없음. 단, exitcode는 0이 아니게 되므로 없는 경로는 위 -d 검사로 미리 걸러냄
                 ')
             
             exitcode=$(echo "$result" | jq -r '.exitcode') # exitcode 검사 후 0 이면, path 검사 진행하는 로직
@@ -49,11 +56,17 @@ if [ "$PHASE" = "post-start" ]; then
             path=$(echo "$result" | jq -r '.["out-data"] // ""') # jq Null check
 
             if [ -n "$path" ]; then
-                echo "발견 : '$VMID' 에 마인크래프트 서버가 발견되었습니다."
-                # discord 웹훅으로 알림 기능 확장
+                payload=$(jq -n --arg content "$message" '{content: $content}')
+                if curl --max-time 5 --fail -s -o /dev/null -H "Content-Type: application/json" -d "$payload" "$WEBHOOK_URL"; then
+                    echo "성공"
+                else
+                    echo "실패"
+                fi
             fi
+
+            # agent 응답 + 검사 완료(발견 여부 무관) 시점에 loop 탈출
             success=true
-            break # 검사 완료 및 loop 탈출
+            break
         fi
         sleep "$SLEEP_SEC" # agent 부팅 대기 후 다음 시도
     done
