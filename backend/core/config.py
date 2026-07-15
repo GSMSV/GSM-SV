@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     CORS_ORIGINS: List[str] = ["http://localhost:3000", "http://localhost:5173"]
 
     # VM 프로비저닝
-    MAX_VMS_PER_USER: int = 3
+    MAX_VMS_PER_USER: int = 2
     TEMPLATE_VMID: int = 1000                       # Ubuntu 22.04 cloud-init 템플릿
     TEMPLATE_VMID_WINDOWS: int = 1001               # Windows Server 템플릿
     VM_DEFAULT_USER: str = "ubuntu"                  # cloud-init 기본 유저명 (Ubuntu)

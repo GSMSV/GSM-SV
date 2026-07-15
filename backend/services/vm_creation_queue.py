@@ -235,6 +235,7 @@ def process_vm_creation_job(job_id: str) -> None:
             custom_cores=payload.get("custom_cores"),
             custom_memory=payload.get("custom_memory"),
             custom_disk=payload.get("custom_disk"),
+            purpose=payload.get("purpose"),
         )
 
         job.status = VMCreationJobStatus.COMPLETED.value

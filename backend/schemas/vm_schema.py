@@ -7,10 +7,8 @@ from pydantic import BaseModel, Field, field_validator
 
 
 class VMTier(str, Enum):
-    MICRO = "micro"
-    SMALL = "small"
-    MEDIUM = "medium"
-    LARGE = "large"
+    BASIC = "basic"
+    STANDARD = "standard"
     # 프로젝트 오너 전용 커스텀 스펙
     PROJECT_CUSTOM = "project_custom"
 
@@ -46,12 +44,13 @@ class SnapshotCreateRequest(BaseModel):
 
 
 class VMCreate(BaseModel):
-    """VM 생성 요청 모델 - 사용자는 os, tier, node_name을 입력 (node_name 필수)"""
+    """VM 생성 요청 모델 - 사용자는 os, tier, node_name, purpose를 입력 (node_name·purpose 필수)"""
 
-    tier: VMTier = VMTier.MICRO
+    tier: VMTier = VMTier.BASIC
     os: VMOs = VMOs.UBUNTU2204
     node_name: Optional[str] = None  # 큐 경로에서 필수 검증, vm_service 직접 호출 시 None 허용
     name: Optional[str] = None
+    purpose: str  # 사용 목적 (모든 역할 필수)
     custom_cores: Optional[int] = None
     custom_memory: Optional[int] = None
     custom_disk: Optional[int] = None
@@ -67,6 +66,32 @@ class VMCreate(BaseModel):
             raise ValueError(
                 "VM 이름은 영문·숫자로 시작하고 영문·숫자·하이픈·언더스코어만 허용합니다."
             )
+        return v
+
+    @field_validator("purpose")
+    @classmethod
+    def validate_purpose(cls, v):
+        v = v.strip()
+        if not v:
+            raise ValueError("사용 목적을 입력해주세요.")
+        if len(v) > 100:
+            raise ValueError("사용 목적은 100자 이하여야 합니다.")
+        return v
+
+
+class VMPurposeUpdate(BaseModel):
+    """VM 사용 목적 수정 요청 모델"""
+
+    purpose: str
+
+    @field_validator("purpose")
+    @classmethod
+    def validate_purpose(cls, v):
+        v = v.strip()
+        if not v:
+            raise ValueError("사용 목적을 입력해주세요.")
+        if len(v) > 100:
+            raise ValueError("사용 목적은 100자 이하여야 합니다.")
         return v
 
 

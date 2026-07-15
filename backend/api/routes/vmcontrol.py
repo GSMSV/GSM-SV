@@ -9,7 +9,7 @@ from core.timezone import now_kst
 from fastapi import APIRouter, HTTPException, status, Depends, Request
 from sqlalchemy import text
 from sqlalchemy.orm import Session
-from schemas.vm_schema import VMAction, VMCreate, VMCreationJobResponse, VMResize, SnapshotCreateRequest
+from schemas.vm_schema import VMAction, VMCreate, VMCreationJobResponse, VMPurposeUpdate, VMResize, SnapshotCreateRequest
 from core.constants import AUTO_SNAP_PREFIX, PROVISIONING_UPTIME_THRESHOLD_SECONDS
 from services.proxmox_client import get_proxmox_for_server, raise_proxmox_http_exception
 from models.server import Server
@@ -168,6 +168,7 @@ async def get_all_vms(
                 "internal_ip": vm.internal_ip,
                 "created_at": str(vm.created_at) if vm.created_at else None,
                 "expires_at": str(vm.expires_at) if vm.expires_at else None,
+                "purpose": vm.purpose,
             }
             try:
                 proxmox = get_proxmox_for_server(server)
@@ -211,6 +212,7 @@ async def get_my_vms(
             "internal_ip": vm.internal_ip,
             "created_at": str(vm.created_at) if vm.created_at else None,
             "expires_at": str(vm.expires_at) if vm.expires_at else None,
+            "purpose": vm.purpose,
         }
         try:
             if vm.server_id not in proxmox_cache:
@@ -284,6 +286,7 @@ async def get_vm_status(
             "vm_password": vm_record.vm_password,
             "created_at": str(vm_record.created_at) if vm_record.created_at else None,
             "expires_at": str(vm_record.expires_at) if vm_record.expires_at else None,
+            "purpose": vm_record.purpose,
             "node": vm_record.server.name,
             "public_ip": vm_record.server.ip_address,
         }
@@ -372,17 +375,17 @@ async def resize_vm(
         raise HTTPException(status_code=400, detail="변경할 값이 없습니다.")
 
     update_params = {}
-    max_memory = 32768  # 32GB
+    max_memory = 16384  # 16GB (PROJECT_CUSTOM 상한)
 
     if body.cores is not None:
-        # cores 값은 총 vCPU 수 (2,4,6,8), 소켓 1 고정 + cores로 조절
-        if body.cores not in (2, 4, 6, 8):
-            raise HTTPException(status_code=400, detail="vCPU는 2, 4, 6, 8 중 선택해주세요.")
+        # cores 값은 총 vCPU 수 (2,4), 소켓 1 고정 + cores로 조절
+        if body.cores not in (2, 4):
+            raise HTTPException(status_code=400, detail="vCPU는 2, 4 중 선택해주세요.")
         update_params["cores"] = body.cores
 
     if body.memory is not None:
         if not (4096 <= body.memory <= max_memory):
-            raise HTTPException(status_code=400, detail=f"RAM은 4096~{max_memory}MB (4~32GB) 범위입니다.")
+            raise HTTPException(status_code=400, detail=f"RAM은 4096~{max_memory}MB (4~16GB) 범위입니다.")
         update_params["memory"] = body.memory
         update_params["balloon"] = body.memory // 2
 
@@ -408,6 +411,23 @@ async def resize_vm(
         raise_proxmox_http_exception(e, default_detail="사양 변경에 실패했습니다.")
 
 
+@router.patch("/{node}/vms/{vmid}/purpose")
+async def update_vm_purpose(
+    node: str,
+    vmid: int,
+    body: VMPurposeUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """VM 사용 목적을 수정합니다. (소유자 또는 관리자)"""
+    vm_record = get_vm_with_owner_check(db, vmid, current_user, node)
+
+    vm_record.purpose = body.purpose
+    db.commit()
+
+    return {"success": True, "purpose": vm_record.purpose}
+
+
 @router.post("/{node}/vms/{vmid}/extend")
 async def extend_vm(
     node: str,
@@ -415,7 +435,7 @@ async def extend_vm(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """VM 만료 기간을 30일 연장합니다. 만료 15일 전부터 가능."""
+    """VM 만료 기간을 14일 연장합니다. 만료 7일 전부터 가능."""
     vm_record = get_vm_with_owner_check(db, vmid, current_user, node)
 
     if not vm_record.expires_at:
@@ -424,18 +444,18 @@ async def extend_vm(
     now = now_kst()
     days_until_expiry = (vm_record.expires_at - now).days
 
-    if days_until_expiry > 15:
+    if days_until_expiry > 7:
         raise HTTPException(
             status_code=400,
-            detail=f"만료 15일 전부터 연장할 수 있습니다. (남은 기간: {days_until_expiry}일)",
+            detail=f"만료 7일 전부터 연장할 수 있습니다. (남은 기간: {days_until_expiry}일)",
         )
 
-    vm_record.expires_at = vm_record.expires_at + timedelta(days=30)
+    vm_record.expires_at = vm_record.expires_at + timedelta(days=14)
     db.commit()
 
     return {
         "success": True,
-        "message": "VM 사용 기간이 30일 연장되었습니다.",
+        "message": "VM 사용 기간이 14일 연장되었습니다.",
         "expires_at": str(vm_record.expires_at),
     }
 
