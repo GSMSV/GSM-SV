@@ -94,13 +94,13 @@ def _notify_admins_background_failure(task_name: str, consecutive_failures: int)
 
 
 def _send_admin_expiry_notifications(db, now) -> None:
-    """7일 이내 만료 VM 목록을 ADMIN 전체에 알림 1개씩 발송."""
+    """3일 이내 만료 VM 목록을 ADMIN 전체에 알림 1개씩 발송."""
     soon_vms = (
         db.query(Vm)
         .filter(
             Vm.expires_at.isnot(None),
             Vm.expires_at > now,
-            Vm.expires_at <= now + timedelta(days=7),
+            Vm.expires_at <= now + timedelta(days=3),
         )
         .all()
     )
@@ -253,13 +253,13 @@ async def _expire_vms_loop():
                     db.rollback()
                     logger.error(f"[expire] VM {vmid} 삭제 실패: {e}")
 
-            # 3. 만료 임박(15일 이내) VM 알림 (하루 1회)
+            # 3. 만료 임박(3일 이내) VM 알림 (하루 1회)
             soon_vms = (
                 db.query(Vm)
                 .filter(
                     Vm.expires_at.isnot(None),
                     Vm.expires_at > now,
-                    Vm.expires_at <= now + timedelta(days=15),
+                    Vm.expires_at <= now + timedelta(days=3),
                 )
                 .all()
             )
@@ -594,7 +594,7 @@ def _collect_discord_daily_report(db, now) -> dict:
         .filter(
             Vm.expires_at.isnot(None),
             Vm.expires_at > now,
-            Vm.expires_at <= now + timedelta(days=7),
+            Vm.expires_at <= now + timedelta(days=3),
         )
         .order_by(Vm.expires_at.asc())
         .all()
