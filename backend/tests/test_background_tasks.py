@@ -174,13 +174,13 @@ def _make_vm(db, name, server, expires_at, owner=None, vmid=100):
 class TestSendAdminExpiryNotifications:
     """_send_admin_expiry_notifications 단위 테스트."""
 
-    def test_vms_within_7_days_sends_list(self, db):
-        """7일 이내 만료 VM 있으면 목록 포함 메시지 발송."""
+    def test_vms_within_3_days_sends_list(self, db):
+        """3일 이내 만료 VM 있으면 목록 포함 메시지 발송."""
         from main import _send_admin_expiry_notifications
         now = datetime(2026, 5, 26, 12, 0, 0)
         server = _make_server(db)
         admin = _make_admin(db, "admin@gsm.hs.kr")
-        _make_vm(db, "vm-alpha", server, now + timedelta(days=3, hours=4))
+        _make_vm(db, "vm-alpha", server, now + timedelta(days=2, hours=4))
         db.commit()
 
         _send_admin_expiry_notifications(db, now)
@@ -189,11 +189,11 @@ class TestSendAdminExpiryNotifications:
         notifs = db.query(Notification).filter(Notification.user_id == admin.id).all()
         assert len(notifs) == 1
         assert "만료 임박 VM 1개" in notifs[0].message
-        assert "vm-alpha(3일 4시간)" in notifs[0].message
+        assert "vm-alpha(2일 4시간)" in notifs[0].message
         assert notifs[0].type == "info"
 
     def test_no_vms_sends_no_notification(self, db):
-        """7일 이내 만료 VM 없으면 알림 발송 안 함."""
+        """3일 이내 만료 VM 없으면 알림 발송 안 함."""
         from main import _send_admin_expiry_notifications
         now = datetime(2026, 5, 26, 12, 0, 0)
         admin = _make_admin(db, "admin2@gsm.hs.kr")
@@ -218,13 +218,13 @@ class TestSendAdminExpiryNotifications:
         db.expire_all()
         assert db.query(Notification).filter(Notification.user_id == admin.id).count() == 0
 
-    def test_vm_beyond_7_days_excluded(self, db):
-        """8일 후 만료 VM은 포함 안 됨."""
+    def test_vm_beyond_3_days_excluded(self, db):
+        """4일 후 만료 VM은 포함 안 됨."""
         from main import _send_admin_expiry_notifications
         now = datetime(2026, 5, 26, 12, 0, 0)
         server = _make_server(db)
         admin = _make_admin(db, "admin4@gsm.hs.kr")
-        _make_vm(db, "far-vm", server, now + timedelta(days=8))
+        _make_vm(db, "far-vm", server, now + timedelta(days=4))
         db.commit()
 
         _send_admin_expiry_notifications(db, now)

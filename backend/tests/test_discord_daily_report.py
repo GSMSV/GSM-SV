@@ -104,8 +104,8 @@ class TestCollectDiscordDailyReport:
         assert report["nodes"][0]["cpu_pct"] is None
         assert report["nodes"][0]["ok"] is False
 
-    def test_includes_vm_expiring_within_7_days(self, db):
-        """7일 이내 만료 VM을 days_left와 함께 포함."""
+    def test_includes_vm_expiring_within_3_days(self, db):
+        """3일 이내 만료 VM을 days_left와 함께 포함."""
         user = _make_user(db)
         server = _make_server(db, "gsmgpu1")
         now = now_kst()
@@ -130,15 +130,15 @@ class TestCollectDiscordDailyReport:
         assert report["vms"][0]["owner_email"] == "hong@gsm.hs.kr"
         assert report["vms"][0]["days_left"] == 3
 
-    def test_excludes_vm_expiring_after_7_days(self, db):
-        """7일 이후 만료 VM은 제외."""
+    def test_excludes_vm_expiring_after_3_days(self, db):
+        """3일 이후 만료 VM은 제외."""
         server = _make_server(db, "gsmgpu1")
         now = now_kst()
         db.add(Vm(
             hypervisor_vmid=102,
             name="vm-far",
             server_id=server.id,
-            expires_at=now + timedelta(days=10),
+            expires_at=now + timedelta(days=5),
         ))
         db.commit()
 
