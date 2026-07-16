@@ -101,7 +101,7 @@ class TestTierSpecs:
     def test_basic_standard_specs(self):
         assert TIER_SPECS[VMTier.BASIC] == {"memory": 2048, "cores": 1, "disk": 20}
         assert TIER_SPECS[VMTier.STANDARD] == {"memory": 4096, "cores": 2, "disk": 20}
-        assert TIER_SPECS[VMTier.PROJECT_CUSTOM] == {"memory": 16384, "cores": 4, "disk": 50}
+        assert TIER_SPECS[VMTier.PROJECT_CUSTOM] == {"memory": 16384, "cores": 4, "disk": 40}
 
     def test_removed_tiers_rejected(self):
         with pytest.raises(ValidationError):

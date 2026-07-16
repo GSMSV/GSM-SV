@@ -342,8 +342,8 @@ def create_vm(
                 raise HTTPException(status_code=400, detail=f"RAM은 2048~{max_specs['memory']}MB 범위입니다.")
             specs["memory"] = custom_memory
         if custom_disk is not None:
-            if not (30 <= custom_disk <= max_specs["disk"]):
-                raise HTTPException(status_code=400, detail=f"디스크는 30~{max_specs['disk']}GB 범위입니다.")
+            if not (20 <= custom_disk <= max_specs["disk"]):
+                raise HTTPException(status_code=400, detail=f"디스크는 20~{max_specs['disk']}GB 범위입니다.")
             specs["disk"] = custom_disk
 
     # 1. 서버 선택
