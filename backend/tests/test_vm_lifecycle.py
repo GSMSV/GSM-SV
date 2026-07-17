@@ -32,6 +32,8 @@ from services.vm_service import (
     delete_vm,
     _allocate_internal_ip,
     _get_next_vmid,
+    _ensure_hook_script,
+    _HOOK_SCRIPT_STORAGE,
 )
 from services.network_service import calculate_ports, manage_iptables
 from services.mon_service import update_server_stats
@@ -205,6 +207,7 @@ class TestIPExhaustion:
 class TestVMCreationCleanup:
     """VM-TC-04/05: VM 생성 중 실패 시 Proxmox VM + iptables 정리"""
 
+    @patch("services.vm_service._ensure_hook_script")
     @patch("services.vm_service._delete_snippet")
     @patch("services.vm_service._upload_snippet")
     @patch("services.vm_service.manage_iptables", return_value=True)
@@ -212,7 +215,7 @@ class TestVMCreationCleanup:
     @patch("services.vm_service._allocate_internal_ip", return_value="10.0.0.100")
     def test_boot_failure_triggers_cleanup(
         self, mock_alloc, mock_proxmox_fn, mock_iptables,
-        mock_upload, mock_del_snippet, db, user, server
+        mock_upload, mock_del_snippet, mock_ensure_hook, db, user, server
     ):
         """VM-TC-04: 부팅 실패 시 Proxmox 삭제 + iptables DELETE + DB 롤백"""
         proxmox = _make_mock_proxmox(200)
@@ -437,6 +440,7 @@ class TestVMCountLimit:
 class TestVMCreationHappyPath:
     """VM-TC-13: 정상 경로 VM 생성"""
 
+    @patch("services.vm_service._ensure_hook_script")
     @patch("services.vm_service._delete_snippet")
     @patch("services.vm_service._upload_snippet")
     @patch("services.vm_service.manage_iptables", return_value=True)
@@ -444,7 +448,7 @@ class TestVMCreationHappyPath:
     @patch("services.vm_service._allocate_internal_ip", return_value="10.0.0.100")
     def test_create_vm_returns_expected_fields(
         self, mock_alloc, mock_proxmox_fn, mock_iptables,
-        mock_upload, mock_del_snippet, db, user, server
+        mock_upload, mock_del_snippet, mock_ensure_hook, db, user, server
     ):
         """생성 결과에 vmid, name, internal_ip, ssh 자격증명 포함"""
         proxmox = _make_mock_proxmox(200)
@@ -471,6 +475,99 @@ class TestVMCreationHappyPath:
             Notification.type == "success",
         ).first()
         assert notif is not None
+
+
+# ── mc-detect hookscript 자동 주입 ────────────────────────────
+
+class TestMcDetectHookScript:
+    """USER VM 생성 시 mc-detect hookscript 노드 배치(_ensure_hook_script) + 등록"""
+
+    def _mock_server(self):
+        s = MagicMock()
+        s.name = "test-node"
+        s.ip_address = "192.168.1.10"
+        s.ssh_port = 22
+        s.ssh_user = "root"
+        s.ssh_password = "sshpass"
+        return s
+
+    @patch("services.vm_service.paramiko.SSHClient")
+    def test_ensure_skips_when_script_exists(self, mock_ssh_class):
+        """이미 존재(stat 성공)하면 업로드/실행권한 설정 생략 (멱등)"""
+        mock_ssh = MagicMock()
+        mock_ssh_class.return_value = mock_ssh
+        sftp = mock_ssh.open_sftp.return_value
+        sftp.stat.return_value = MagicMock()  # 파일 존재 → 예외 없음
+
+        _ensure_hook_script(self._mock_server())
+
+        sftp.file.assert_not_called()
+        sftp.chmod.assert_not_called()
+
+    @patch("services.vm_service._HOOK_SCRIPT_LOCAL")
+    @patch("services.vm_service.paramiko.SSHClient")
+    def test_ensure_uploads_and_chmods_when_missing(self, mock_ssh_class, mock_local):
+        """없으면(stat FileNotFoundError) 업로드 + chmod 0o755"""
+        mock_local.read_text.return_value = "#!/bin/bash\necho hi\n"
+        mock_ssh = MagicMock()
+        mock_ssh_class.return_value = mock_ssh
+        sftp = mock_ssh.open_sftp.return_value
+        sftp.stat.side_effect = FileNotFoundError()
+
+        _ensure_hook_script(self._mock_server())
+
+        sftp.file.assert_called_once()               # 업로드 발생
+        sftp.chmod.assert_called_once()              # 실행권한 부여
+        assert sftp.chmod.call_args.args[1] == 0o755
+
+    def test_ensure_raises_without_ssh_user(self):
+        """SSH 계정 미설정 시 RuntimeError"""
+        s = self._mock_server()
+        s.ssh_user = None
+        with pytest.raises(RuntimeError):
+            _ensure_hook_script(s)
+
+    @patch("services.vm_service._ensure_hook_script")
+    @patch("services.vm_service._delete_snippet")
+    @patch("services.vm_service._upload_snippet")
+    @patch("services.vm_service.manage_iptables", return_value=True)
+    @patch("services.vm_service.get_proxmox_for_server")
+    @patch("services.vm_service._allocate_internal_ip", return_value="10.0.0.100")
+    def test_hookscript_registered_for_user_vm(
+        self, mock_alloc, mock_proxmox_fn, mock_iptables,
+        mock_upload, mock_del_snippet, mock_ensure_hook, db, user, server
+    ):
+        """USER VM: _ensure_hook_script 호출 + config.put(hookscript=...) 등록"""
+        proxmox = _make_mock_proxmox(200)
+        mock_proxmox_fn.return_value = proxmox
+
+        create_vm(db, user, VMTier.MICRO, node_name="test-node")
+
+        mock_ensure_hook.assert_called_once()
+        put_calls = proxmox.nodes.return_value.qemu.return_value.config.put.call_args_list
+        assert any(c.kwargs.get("hookscript") == _HOOK_SCRIPT_STORAGE for c in put_calls), \
+            "USER VM엔 hookscript가 등록되어야 합니다"
+
+    @patch("services.vm_service._ensure_hook_script")
+    @patch("services.vm_service._delete_snippet")
+    @patch("services.vm_service._upload_snippet")
+    @patch("services.vm_service.manage_iptables", return_value=True)
+    @patch("services.vm_service.get_proxmox_for_server")
+    @patch("services.vm_service._allocate_internal_ip", return_value="10.0.0.100")
+    def test_hookscript_not_registered_for_admin_vm(
+        self, mock_alloc, mock_proxmox_fn, mock_iptables,
+        mock_upload, mock_del_snippet, mock_ensure_hook, db, admin_user, server
+    ):
+        """ADMIN VM: 훅 미등록 (_ensure_hook_script 미호출, hookscript 미등록)"""
+        proxmox = _make_mock_proxmox(200)
+        mock_proxmox_fn.return_value = proxmox
+
+        create_vm(db, admin_user, VMTier.MICRO, node_name="test-node")
+
+        mock_ensure_hook.assert_not_called()
+        put_calls = proxmox.nodes.return_value.qemu.return_value.config.put.call_args_list
+        assert all(c.kwargs.get("hookscript") is None for c in put_calls), \
+            "ADMIN VM엔 hookscript가 등록되지 않아야 합니다"
 
 
 # ── VM-TC-14: 정상 VM 삭제 흐름 ──────────────────────────────

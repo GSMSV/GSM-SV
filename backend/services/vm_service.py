@@ -6,6 +6,7 @@ import time
 import threading
 import paramiko
 from datetime import timedelta
+from pathlib import Path
 from core.timezone import now_kst
 
 from fastapi import HTTPException, status
@@ -134,6 +135,11 @@ def _allocate_internal_ip(db: Session) -> str:
 
 SNIPPETS_DIR = "/var/lib/vz/snippets"
 
+# mc-detect hookscript (학생 VM 마인크래프트 서버 탐지) — 모든 VM이 공유하는 고정 스크립트
+_HOOK_SCRIPT_NAME = "mc-detect-hook.sh"
+_HOOK_SCRIPT_LOCAL = Path(__file__).resolve().parent.parent / "scripts" / "hooks" / _HOOK_SCRIPT_NAME
+_HOOK_SCRIPT_STORAGE = f"local:snippets/{_HOOK_SCRIPT_NAME}"
+
 
 def _cleanup_vm_db_record(db: Session, vm: Vm) -> None:
     """조기 커밋된 VM 레코드와 연관 VmPort를 삭제합니다. 실패 시 경고 로깅."""
@@ -229,6 +235,47 @@ def _delete_snippet(server: Server, filename: str):
     except Exception as e:
         logger.warning(f"스니펫 삭제 실패 (무시): {e}")
     finally:
+        ssh.close()
+
+
+def _ensure_hook_script(server: Server) -> None:
+    """Proxmox 노드에 mc-detect hookscript가 없으면 업로드하고 실행권한(+x)을 부여합니다.
+
+    모든 VM이 공유하는 고정 스크립트이므로 이미 존재하면 아무것도 하지 않습니다(멱등).
+    """
+    if not server.ssh_user:
+        raise RuntimeError(f"서버 {server.name}에 SSH 계정이 설정되지 않았습니다.")
+
+    remote_path = f"{SNIPPETS_DIR}/{_HOOK_SCRIPT_NAME}"
+
+    ssh = paramiko.SSHClient()
+    ssh.set_missing_host_key_policy(paramiko.WarningPolicy())
+    sftp = None
+    try:
+        ssh.connect(
+            hostname=server.ip_address,
+            port=server.ssh_port or 22,
+            username=server.ssh_user,
+            password=server.ssh_password,
+            timeout=10,
+        )
+        sftp = ssh.open_sftp()
+        sftp.get_channel().settimeout(15)  # SFTP 작업 타임아웃
+        try:
+            sftp.stat(remote_path)
+            return  # 이미 존재 → skip (finally에서 연결 정리)
+        except FileNotFoundError:
+            pass  # 파일 없음(ENOENT) → 아래에서 업로드. 권한 등 다른 오류는 전파
+
+        # Windows 작업 환경의 CRLF가 섞이면 리눅스 bash가 깨지므로 LF로 정규화
+        content = _HOOK_SCRIPT_LOCAL.read_text(encoding="utf-8").replace("\r\n", "\n")
+        with sftp.file(remote_path, "w") as f:
+            f.write(content)
+        sftp.chmod(remote_path, 0o755)  # 실행 권한 필수 — 없으면 Proxmox가 훅 무시
+        logger.info(f"mc-detect hookscript 업로드 완료: {server.name}:{remote_path}")
+    finally:
+        if sftp is not None:
+            sftp.close()
         ssh.close()
 
 
@@ -504,6 +551,14 @@ def create_vm(
         if not manage_iptables(server, vmid, internal_ip, action="ADD"):
             raise RuntimeError("iptables 포트포워딩 등록에 실패했습니다.")
         iptables_added = True
+
+        # 8-1. 학생(USER) VM만 mc-detect hookscript 등록 (best-effort — 실패해도 생성 계속)
+        if current_user.role == UserRole.USER:
+            try:
+                _ensure_hook_script(server)
+                proxmox.nodes(server.name).qemu(vmid).config.put(hookscript=_HOOK_SCRIPT_STORAGE)
+            except Exception as e:
+                logger.warning(f"VM {vmid} mc-detect hookscript 등록 실패 (무시): {e}")
 
         # 9. VM 부팅
         proxmox.nodes(server.name).qemu(vmid).status.start.post()
