@@ -1,15 +1,15 @@
 import re
-from pydantic import BaseModel, Field, field_validator
-from typing import Optional
+from datetime import datetime
 from enum import Enum
+from typing import Optional
+
+from pydantic import BaseModel, Field, field_validator
 
 
 class VMTier(str, Enum):
-    MICRO = "micro"
-    SMALL = "small"
-    MEDIUM = "medium"
-    LARGE = "large"
-    # 프로젝트 오너 전용 커스텀 티어
+    BASIC = "basic"
+    STANDARD = "standard"
+    # 프로젝트 오너 전용 커스텀 스펙
     PROJECT_CUSTOM = "project_custom"
 
 
@@ -34,8 +34,8 @@ class VMAction(BaseModel):
 class VMResize(BaseModel):
     """VM 사양 변경 요청 모델 (핫플러그)"""
 
-    cores: Optional[int] = None  # vCPU 수
-    memory: Optional[int] = None  # RAM (MB 단위)
+    cores: Optional[int] = None
+    memory: Optional[int] = None
 
 
 class SnapshotCreateRequest(BaseModel):
@@ -44,16 +44,16 @@ class SnapshotCreateRequest(BaseModel):
 
 
 class VMCreate(BaseModel):
-    """VM 생성 요청 모델 — 사용자는 os, tier와 선택적으로 node_name만 입력"""
+    """VM 생성 요청 모델 - 사용자는 os, tier, node_name, purpose를 입력 (node_name·purpose 필수)"""
 
-    tier: VMTier = VMTier.MICRO
+    tier: VMTier = VMTier.BASIC
     os: VMOs = VMOs.UBUNTU2204
-    node_name: Optional[str] = None  # 미지정 시 Auto Provisioning
-    name: Optional[str] = None  # 미지정 시 자동 생성
-    # project_custom 전용 커스텀 스펙 (미입력 시 기본값 사용)
-    custom_cores: Optional[int] = None  # vCPU 수 (1~8)
-    custom_memory: Optional[int] = None  # RAM (MB 단위, 1024~32768)
-    custom_disk: Optional[int] = None  # 디스크 (GB 단위, 30~70)
+    node_name: Optional[str] = None  # 큐 경로에서 필수 검증, vm_service 직접 호출 시 None 허용
+    name: Optional[str] = None
+    purpose: str  # 사용 목적 (모든 역할 필수)
+    custom_cores: Optional[int] = None
+    custom_memory: Optional[int] = None
+    custom_disk: Optional[int] = None
 
     @field_validator("name")
     @classmethod
@@ -67,3 +67,52 @@ class VMCreate(BaseModel):
                 "VM 이름은 영문·숫자로 시작하고 영문·숫자·하이픈·언더스코어만 허용합니다."
             )
         return v
+
+    @field_validator("purpose")
+    @classmethod
+    def validate_purpose(cls, v):
+        v = v.strip()
+        if not v:
+            raise ValueError("사용 목적을 입력해주세요.")
+        if len(v) > 100:
+            raise ValueError("사용 목적은 100자 이하여야 합니다.")
+        return v
+
+
+class VMPurposeUpdate(BaseModel):
+    """VM 사용 목적 수정 요청 모델"""
+
+    purpose: str
+
+    @field_validator("purpose")
+    @classmethod
+    def validate_purpose(cls, v):
+        v = v.strip()
+        if not v:
+            raise ValueError("사용 목적을 입력해주세요.")
+        if len(v) > 100:
+            raise ValueError("사용 목적은 100자 이하여야 합니다.")
+        return v
+
+
+class VMCreationJobStatus(str, Enum):
+    QUEUED = "queued"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class VMCreationJobResponse(BaseModel):
+    """VM 생성 큐 작업 상태 응답."""
+
+    job_id: str
+    status: VMCreationJobStatus
+    position: Optional[int] = None
+    requested_at: datetime
+    started_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
+    vmid: Optional[int] = None
+    node_name: Optional[str] = None
+    message: Optional[str] = None
+    error_message: Optional[str] = None
+    result: Optional[dict] = None

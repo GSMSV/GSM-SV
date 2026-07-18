@@ -9,11 +9,12 @@ from core.timezone import now_kst
 from fastapi import APIRouter, HTTPException, status, Depends, Request
 from sqlalchemy import text
 from sqlalchemy.orm import Session
-from schemas.vm_schema import VMAction, VMCreate, VMResize, SnapshotCreateRequest
+from schemas.vm_schema import VMAction, VMCreate, VMCreationJobResponse, VMPurposeUpdate, VMResize, SnapshotCreateRequest
 from core.constants import AUTO_SNAP_PREFIX, PROVISIONING_UPTIME_THRESHOLD_SECONDS
 from services.proxmox_client import get_proxmox_for_server, raise_proxmox_http_exception
 from models.server import Server
-from services.vm_service import create_vm, delete_vm
+from services.vm_creation_queue import enqueue_vm_creation, get_vm_creation_job
+from services.vm_service import delete_vm
 from core.database import get_db
 from models.vm import Vm
 from models.user import User, UserRole
@@ -167,6 +168,7 @@ async def get_all_vms(
                 "internal_ip": vm.internal_ip,
                 "created_at": str(vm.created_at) if vm.created_at else None,
                 "expires_at": str(vm.expires_at) if vm.expires_at else None,
+                "purpose": vm.purpose,
             }
             try:
                 proxmox = get_proxmox_for_server(server)
@@ -210,6 +212,7 @@ async def get_my_vms(
             "internal_ip": vm.internal_ip,
             "created_at": str(vm.created_at) if vm.created_at else None,
             "expires_at": str(vm.expires_at) if vm.expires_at else None,
+            "purpose": vm.purpose,
         }
         try:
             if vm.server_id not in proxmox_cache:
@@ -283,6 +286,7 @@ async def get_vm_status(
             "vm_password": vm_record.vm_password,
             "created_at": str(vm_record.created_at) if vm_record.created_at else None,
             "expires_at": str(vm_record.expires_at) if vm_record.expires_at else None,
+            "purpose": vm_record.purpose,
             "node": vm_record.server.name,
             "public_ip": vm_record.server.ip_address,
         }
@@ -371,17 +375,17 @@ async def resize_vm(
         raise HTTPException(status_code=400, detail="변경할 값이 없습니다.")
 
     update_params = {}
-    max_memory = 32768  # 32GB
+    max_memory = 16384  # 16GB (PROJECT_CUSTOM 상한)
 
     if body.cores is not None:
-        # cores 값은 총 vCPU 수 (2,4,6,8), 소켓 1 고정 + cores로 조절
-        if body.cores not in (2, 4, 6, 8):
-            raise HTTPException(status_code=400, detail="vCPU는 2, 4, 6, 8 중 선택해주세요.")
+        # cores 값은 총 vCPU 수 (2,4), 소켓 1 고정 + cores로 조절
+        if body.cores not in (2, 4):
+            raise HTTPException(status_code=400, detail="vCPU는 2, 4 중 선택해주세요.")
         update_params["cores"] = body.cores
 
     if body.memory is not None:
         if not (4096 <= body.memory <= max_memory):
-            raise HTTPException(status_code=400, detail=f"RAM은 4096~{max_memory}MB (4~32GB) 범위입니다.")
+            raise HTTPException(status_code=400, detail=f"RAM은 4096~{max_memory}MB (4~16GB) 범위입니다.")
         update_params["memory"] = body.memory
         update_params["balloon"] = body.memory // 2
 
@@ -407,6 +411,23 @@ async def resize_vm(
         raise_proxmox_http_exception(e, default_detail="사양 변경에 실패했습니다.")
 
 
+@router.patch("/{node}/vms/{vmid}/purpose")
+async def update_vm_purpose(
+    node: str,
+    vmid: int,
+    body: VMPurposeUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """VM 사용 목적을 수정합니다. (소유자 또는 관리자)"""
+    vm_record = get_vm_with_owner_check(db, vmid, current_user, node)
+
+    vm_record.purpose = body.purpose
+    db.commit()
+
+    return {"success": True, "purpose": vm_record.purpose}
+
+
 @router.post("/{node}/vms/{vmid}/extend")
 async def extend_vm(
     node: str,
@@ -414,7 +435,7 @@ async def extend_vm(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """VM 만료 기간을 30일 연장합니다. 만료 15일 전부터 가능."""
+    """VM 만료 기간을 14일 연장합니다. 만료 7일 전부터 가능."""
     vm_record = get_vm_with_owner_check(db, vmid, current_user, node)
 
     if not vm_record.expires_at:
@@ -423,18 +444,18 @@ async def extend_vm(
     now = now_kst()
     days_until_expiry = (vm_record.expires_at - now).days
 
-    if days_until_expiry > 15:
+    if days_until_expiry > 7:
         raise HTTPException(
             status_code=400,
-            detail=f"만료 15일 전부터 연장할 수 있습니다. (남은 기간: {days_until_expiry}일)",
+            detail=f"만료 7일 전부터 연장할 수 있습니다. (남은 기간: {days_until_expiry}일)",
         )
 
-    vm_record.expires_at = vm_record.expires_at + timedelta(days=30)
+    vm_record.expires_at = vm_record.expires_at + timedelta(days=14)
     db.commit()
 
     return {
         "success": True,
-        "message": "VM 사용 기간이 30일 연장되었습니다.",
+        "message": "VM 사용 기간이 14일 연장되었습니다.",
         "expires_at": str(vm_record.expires_at),
     }
 
@@ -487,7 +508,7 @@ async def control_vm(
         raise_proxmox_http_exception(e, default_detail="서버 오류가 발생했습니다.")
 
 
-@router.post("/create", status_code=status.HTTP_201_CREATED)
+@router.post("/create", status_code=status.HTTP_202_ACCEPTED, response_model=VMCreationJobResponse)
 @limiter.limit("5/minute")
 async def create_vm_endpoint(
     request: Request,
@@ -495,21 +516,21 @@ async def create_vm_endpoint(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """새로운 VM 생성 (Auto-Provisioning 적용)"""
-    return create_vm(
-        db=db,
-        current_user=current_user,
-        tier=vm_config.tier,
-        os=vm_config.os,
-        node_name=vm_config.node_name,
-        name=vm_config.name,
-        custom_cores=vm_config.custom_cores,
-        custom_memory=vm_config.custom_memory,
-        custom_disk=vm_config.custom_disk,
-    )
+    """VM 생성 요청을 큐에 넣는다."""
+    return enqueue_vm_creation(db=db, current_user=current_user, vm_config=vm_config)
 
 
 # ── 스냅샷 관리 ─────────────────────────────────────────────
+
+
+@router.get("/jobs/{job_id}", response_model=VMCreationJobResponse)
+async def get_vm_creation_job_status(
+    job_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """VM 생성 큐 작업 상태를 조회한다."""
+    return get_vm_creation_job(db=db, job_id=job_id, current_user=current_user)
 
 
 @router.get("/{node}/vms/{vmid}/snapshots")

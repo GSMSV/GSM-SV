@@ -33,6 +33,8 @@ from models.notification import Notification
 from models.user import User, UserRole
 from models.server import Server
 from services.mon_service import get_server_resource_usage
+from models.vm_creation_job import VmCreationJob  # noqa: F401
+from services.vm_creation_queue import start_vm_creation_worker, stop_vm_creation_worker
 from models.faq_question import FaqQuestion  # noqa: F401 — create_all 자동 반영
 from models.vm_port import VmPort  # noqa: F401 — create_all 자동 반영
 
@@ -92,13 +94,13 @@ def _notify_admins_background_failure(task_name: str, consecutive_failures: int)
 
 
 def _send_admin_expiry_notifications(db, now) -> None:
-    """7일 이내 만료 VM 목록을 ADMIN 전체에 알림 1개씩 발송."""
+    """3일 이내 만료 VM 목록을 ADMIN 전체에 알림 1개씩 발송."""
     soon_vms = (
         db.query(Vm)
         .filter(
             Vm.expires_at.isnot(None),
             Vm.expires_at > now,
-            Vm.expires_at <= now + timedelta(days=7),
+            Vm.expires_at <= now + timedelta(days=3),
         )
         .all()
     )
@@ -251,13 +253,13 @@ async def _expire_vms_loop():
                     db.rollback()
                     logger.error(f"[expire] VM {vmid} 삭제 실패: {e}")
 
-            # 3. 만료 임박(15일 이내) VM 알림 (하루 1회)
+            # 3. 만료 임박(3일 이내) VM 알림 (하루 1회)
             soon_vms = (
                 db.query(Vm)
                 .filter(
                     Vm.expires_at.isnot(None),
                     Vm.expires_at > now,
-                    Vm.expires_at <= now + timedelta(days=15),
+                    Vm.expires_at <= now + timedelta(days=3),
                 )
                 .all()
             )
@@ -592,7 +594,7 @@ def _collect_discord_daily_report(db, now) -> dict:
         .filter(
             Vm.expires_at.isnot(None),
             Vm.expires_at > now,
-            Vm.expires_at <= now + timedelta(days=7),
+            Vm.expires_at <= now + timedelta(days=3),
         )
         .order_by(Vm.expires_at.asc())
         .all()
@@ -761,6 +763,7 @@ async def lifespan(app: FastAPI):
     expiry_notify_task = asyncio.create_task(_admin_expiry_notify_loop())
     # Discord 일일 모니터링 리포트 (KST DISCORD_DAILY_HOUR시)
     discord_daily_task = asyncio.create_task(_discord_daily_loop())
+    start_vm_creation_worker()
 
     yield
     # ── 종료 시 ──
@@ -770,6 +773,7 @@ async def lifespan(app: FastAPI):
     oauth_cleanup_task.cancel()
     expiry_notify_task.cancel()
     discord_daily_task.cancel()
+    stop_vm_creation_worker()
     await serverless._http_client.aclose()
 
 

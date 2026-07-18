@@ -9,14 +9,24 @@ from unittest.mock import patch, MagicMock
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+from core.timezone import now_kst
 from core.database import Base
 from models.user import User, UserRole
 from models.server import Server
 from models.vm import Vm
 from models.vm_port import VmPort
 from models.notification import Notification
-from schemas.vm_schema import VMCreate, VMTier, SnapshotCreateRequest
+from schemas.vm_schema import VMCreate, VMCreationJobStatus, VMTier, SnapshotCreateRequest
 from api.routes.vmcontrol import create_snapshot
+from models.vm_creation_job import VmCreationJob
+from services.vm_creation_queue import (
+    enqueue_vm_creation,
+    get_vm_creation_job,
+    _get_queue_position,
+    _next_job_id,
+    _recover_pending_jobs,
+    process_vm_creation_job,
+)
 from services.vm_service import (
     create_vm,
     delete_vm,
@@ -212,7 +222,7 @@ class TestVMCreationCleanup:
 
         from fastapi import HTTPException
         with pytest.raises(HTTPException) as exc_info:
-            create_vm(db, user, VMTier.MICRO, node_name="test-node")
+            create_vm(db, user, VMTier.BASIC, node_name="test-node")
 
         assert exc_info.value.status_code == 500
         # Proxmox VM 삭제 시도 확인
@@ -237,7 +247,7 @@ class TestVMCreationCleanup:
 
         from fastapi import HTTPException
         with pytest.raises(HTTPException) as exc_info:
-            create_vm(db, user, VMTier.MICRO, node_name="test-node")
+            create_vm(db, user, VMTier.BASIC, node_name="test-node")
 
         assert exc_info.value.status_code == 500
         # Proxmox VM 삭제 시도
@@ -314,37 +324,37 @@ class TestVMNameValidation:
     def test_command_injection_rejected(self):
         """VM-TC-08: 명령어 인젝션 시도 → 422"""
         with pytest.raises(ValueError):
-            VMCreate(tier=VMTier.MICRO, name="test; rm -rf /")
+            VMCreate(tier=VMTier.BASIC, purpose="테스트용", name="test; rm -rf /")
 
     def test_too_long_name_rejected(self):
         """VM-TC-09: 41자 이상 이름 → 422"""
         with pytest.raises(ValueError):
-            VMCreate(tier=VMTier.MICRO, name="a" * 41)
+            VMCreate(tier=VMTier.BASIC, purpose="테스트용", name="a" * 41)
 
     def test_valid_name_accepted(self):
         """VM-TC-10: 정상 이름 통과"""
-        vm = VMCreate(tier=VMTier.MICRO, name="valid-name_1")
+        vm = VMCreate(tier=VMTier.BASIC, purpose="테스트용", name="valid-name_1")
         assert vm.name == "valid-name_1"
 
     def test_none_name_accepted(self):
         """이름 미지정 시 자동 생성 (None 통과)"""
-        vm = VMCreate(tier=VMTier.MICRO, name=None)
+        vm = VMCreate(tier=VMTier.BASIC, purpose="테스트용", name=None)
         assert vm.name is None
 
     def test_name_starting_with_dash_rejected(self):
         """대시로 시작하는 이름 거부"""
         with pytest.raises(ValueError):
-            VMCreate(tier=VMTier.MICRO, name="-invalid")
+            VMCreate(tier=VMTier.BASIC, purpose="테스트용", name="-invalid")
 
     def test_korean_name_rejected(self):
         """한글 이름 거부"""
         with pytest.raises(ValueError):
-            VMCreate(tier=VMTier.MICRO, name="테스트VM")
+            VMCreate(tier=VMTier.BASIC, purpose="테스트용", name="테스트VM")
 
     def test_name_with_spaces_rejected(self):
         """공백 포함 이름 거부"""
         with pytest.raises(ValueError):
-            VMCreate(tier=VMTier.MICRO, name="my vm")
+            VMCreate(tier=VMTier.BASIC, purpose="테스트용", name="my vm")
 
 
 # ── VM-TC-11: Proxmox 오프라인 시 update_server_stats ─────────
@@ -418,7 +428,7 @@ class TestVMCountLimit:
 
         from fastapi import HTTPException
         with pytest.raises(HTTPException) as exc_info:
-            create_vm(db, user, VMTier.MICRO, node_name="test-node")
+            create_vm(db, user, VMTier.BASIC, node_name="test-node")
         assert exc_info.value.status_code == 409
 
 
@@ -440,14 +450,14 @@ class TestVMCreationHappyPath:
         proxmox = _make_mock_proxmox(200)
         mock_proxmox_fn.return_value = proxmox
 
-        result = create_vm(db, user, VMTier.MICRO, node_name="test-node")
+        result = create_vm(db, user, VMTier.BASIC, node_name="test-node")
 
         assert result["success"] is True
         assert result["vmid"] == 200
         assert result["internal_ip"] == "10.0.0.100"
         assert "ssh_user" in result
         assert "ssh_password" in result
-        assert result["tier"] == "micro"
+        assert result["tier"] == "basic"
 
         # DB에 VM 레코드 생성 확인
         vm = db.query(Vm).filter(Vm.hypervisor_vmid == 200).first()
@@ -694,7 +704,7 @@ class TestBestServerRoleFilters:
         from fastapi import HTTPException
 
         with pytest.raises(HTTPException) as exc_info:
-            create_vm(db, admin_user, VMTier.MICRO)
+            create_vm(db, admin_user, VMTier.BASIC)
 
         assert exc_info.value.status_code == 400
 
@@ -764,3 +774,150 @@ class TestSnapshotCreation:
         )
 
         assert result["success"] is True
+
+
+class TestVMCreationQueue:
+    """VM 생성 큐 동작 검증"""
+
+    @patch("services.vm_creation_queue.create_vm")
+    @patch("services.vm_creation_queue.SessionLocal", new=TestSession)
+    def test_enqueue_and_process_job(self, mock_create_vm, db, user, server):
+        vm_config = VMCreate(tier=VMTier.BASIC, purpose="테스트용", node_name=server.name, name="queued-vm")
+
+        queued = enqueue_vm_creation(db=db, current_user=user, vm_config=vm_config)
+        assert queued.status == VMCreationJobStatus.QUEUED
+        assert queued.position == 1
+
+        job = db.query(VmCreationJob).filter(VmCreationJob.id == queued.job_id).first()
+        assert job is not None
+        assert job.status == "queued"
+
+        mock_create_vm.return_value = {
+            "success": True,
+            "message": "VM queued-vm(301)가 노드 'test-node'에 생성되었습니다.",
+            "assigned_node": server.name,
+            "vmid": 301,
+            "name": "queued-vm",
+            "tier": "basic",
+            "internal_ip": "10.0.0.150",
+            "ssh_user": "ubuntu",
+            "ssh_password": "secret",
+        }
+
+        process_vm_creation_job(queued.job_id)
+
+        db.refresh(job)
+        assert job.status == "completed"
+        assert job.vmid == 301
+        assert job.result["vmid"] == 301
+        assert job.message is not None
+
+    def test_job_access_is_owner_only_or_admin(self, db, user, admin_user, server):
+        vm_config = VMCreate(tier=VMTier.BASIC, purpose="테스트용", node_name=server.name, name="owner-vm")
+        queued = enqueue_vm_creation(db=db, current_user=user, vm_config=vm_config)
+
+        result = get_vm_creation_job(db=db, job_id=queued.job_id, current_user=user)
+        assert result.job_id == queued.job_id
+
+        result_admin = get_vm_creation_job(db=db, job_id=queued.job_id, current_user=admin_user)
+        assert result_admin.job_id == queued.job_id
+
+    def test_job_access_denied_for_other_user(self, db, user, server):
+        """다른 일반 사용자는 타인의 잡에 접근할 수 없다 (404 반환)."""
+        import pytest
+        from fastapi import HTTPException as FastAPIHTTPException
+
+        other_user = User(
+            email="other@gsm.hs.kr",
+            hashed_password="hashed",
+            role=UserRole.USER,
+            is_active=True,
+        )
+        db.add(other_user)
+        db.commit()
+        db.refresh(other_user)
+
+        vm_config = VMCreate(tier=VMTier.BASIC, purpose="테스트용", node_name=server.name, name="private-vm")
+        queued = enqueue_vm_creation(db=db, current_user=user, vm_config=vm_config)
+
+        with pytest.raises(FastAPIHTTPException) as exc_info:
+            get_vm_creation_job(db=db, job_id=queued.job_id, current_user=other_user)
+        assert exc_info.value.status_code == 404
+
+    def test_queue_position_is_deterministic_for_same_timestamp(self, db, user, server):
+        queued_at = now_kst()
+        first_job = VmCreationJob(
+            id="00000000-0000-0000-0000-000000000001",
+            user_id=user.id,
+            status=VMCreationJobStatus.QUEUED.value,
+            tier=VMTier.BASIC.value,
+            os="ubuntu2204",
+            node_name=server.name,
+            requested_name="first",
+            queued_at=queued_at,
+        )
+        first_job.payload = {"tier": VMTier.BASIC.value, "os": "ubuntu2204", "node_name": server.name, "name": "first"}
+
+        second_job = VmCreationJob(
+            id="00000000-0000-0000-0000-000000000002",
+            user_id=user.id,
+            status=VMCreationJobStatus.QUEUED.value,
+            tier=VMTier.BASIC.value,
+            os="ubuntu2204",
+            node_name=server.name,
+            requested_name="second",
+            queued_at=queued_at,
+        )
+        second_job.payload = {"tier": VMTier.BASIC.value, "os": "ubuntu2204", "node_name": server.name, "name": "second"}
+
+        db.add_all([first_job, second_job])
+        db.commit()
+
+        assert _get_queue_position(db, first_job) == 1
+        assert _get_queue_position(db, second_job) == 2
+
+    def test_next_job_id_is_monotonic(self):
+        first_id = _next_job_id()
+        second_id = _next_job_id()
+
+        assert first_id != second_id
+        assert first_id < second_id
+
+    def test_recover_pending_jobs_requeues_running_jobs(self, db, user, server):
+        queued_job = VmCreationJob(
+            id="00000000-0000-0000-0000-000000000010",
+            user_id=user.id,
+            status=VMCreationJobStatus.QUEUED.value,
+            tier=VMTier.BASIC.value,
+            os="ubuntu2204",
+            node_name=server.name,
+            requested_name="queued",
+            queued_at=now_kst(),
+        )
+        queued_job.payload = {"tier": VMTier.BASIC.value, "os": "ubuntu2204", "node_name": server.name, "name": "queued"}
+
+        running_job = VmCreationJob(
+            id="00000000-0000-0000-0000-000000000011",
+            user_id=user.id,
+            status=VMCreationJobStatus.RUNNING.value,
+            tier=VMTier.BASIC.value,
+            os="ubuntu2204",
+            node_name=server.name,
+            requested_name="running",
+            queued_at=now_kst(),
+            started_at=now_kst(),
+        )
+        running_job.payload = {"tier": VMTier.BASIC.value, "os": "ubuntu2204", "node_name": server.name, "name": "running"}
+
+        db.add_all([queued_job, running_job])
+        db.commit()
+
+        recovered = _recover_pending_jobs(db)
+
+        db.refresh(queued_job)
+        db.refresh(running_job)
+
+        assert [job.id for job in recovered] == [queued_job.id, running_job.id]
+        assert queued_job.status == VMCreationJobStatus.QUEUED.value
+        assert running_job.status == VMCreationJobStatus.QUEUED.value
+        assert running_job.started_at is None

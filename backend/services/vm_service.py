@@ -290,6 +290,7 @@ def create_vm(
     custom_cores: int = None,
     custom_memory: int = None,
     custom_disk: int = None,
+    purpose: str = None,
 ):
     """
     VM 생성 (Full Clone + Cloud-Init + 포트포워딩)
@@ -338,11 +339,11 @@ def create_vm(
             specs["cores"] = custom_cores
         if custom_memory is not None:
             if not (2048 <= custom_memory <= max_specs["memory"]):
-                raise HTTPException(status_code=400, detail=f"RAM은 2048~{max_specs['memory']}MB (2~32GB) 범위입니다.")
+                raise HTTPException(status_code=400, detail=f"RAM은 2048~{max_specs['memory']}MB 범위입니다.")
             specs["memory"] = custom_memory
         if custom_disk is not None:
-            if not (30 <= custom_disk <= max_specs["disk"]):
-                raise HTTPException(status_code=400, detail=f"디스크는 30~{max_specs['disk']}GB 범위입니다.")
+            if not (20 <= custom_disk <= max_specs["disk"]):
+                raise HTTPException(status_code=400, detail=f"디스크는 20~{max_specs['disk']}GB 범위입니다.")
             specs["disk"] = custom_disk
 
     # 1. 서버 선택
@@ -408,7 +409,7 @@ def create_vm(
     internal_ip = _allocate_internal_ip(db)
     expires_at = None
     if current_user.role == UserRole.USER:
-        expires_at = now_kst() + timedelta(days=30)
+        expires_at = now_kst() + timedelta(days=7)
 
     new_vm = Vm(
         hypervisor_vmid=vmid,
@@ -421,6 +422,7 @@ def create_vm(
         internal_ip=internal_ip,
         vm_password=vm_password,
         expires_at=expires_at,
+        purpose=purpose,
     )
     db.add(new_vm)
     db.flush()  # new_vm.id 확보
