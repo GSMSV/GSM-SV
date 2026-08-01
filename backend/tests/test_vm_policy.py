@@ -251,3 +251,36 @@ class TestPurpose:
                 db=db, current_user=other,
             ))
         assert exc_info.value.status_code == 404
+
+
+# ── 생성 미완료 VM 전원 제어 차단 ────────────────────────────
+
+class TestReadyGuard:
+    def test_control_vm_blocked_while_not_ready(self, db, user, server):
+        """ready=False인 VM은 시작/재시작 등 전원 제어가 409로 차단됨"""
+        from fastapi import HTTPException
+        from starlette.requests import Request
+        from schemas.vm_schema import VMAction
+        from api.routes.vmcontrol import control_vm
+
+        vm = Vm(
+            hypervisor_vmid=500,
+            name="not-ready-vm",
+            server_id=server.id,
+            owner_id=user.id,
+            ready=False,
+        )
+        db.add(vm)
+        db.commit()
+
+        request = Request(scope={
+            "type": "http", "method": "POST", "path": "/",
+            "headers": [], "client": ("test", 1234),
+        })
+
+        with pytest.raises(HTTPException) as exc_info:
+            asyncio.run(control_vm(
+                request, "test-node", 500, VMAction(action="start"),
+                db=db, current_user=user,
+            ))
+        assert exc_info.value.status_code == 409

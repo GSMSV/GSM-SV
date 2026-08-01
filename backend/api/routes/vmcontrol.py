@@ -169,6 +169,7 @@ async def get_all_vms(
                 "created_at": str(vm.created_at) if vm.created_at else None,
                 "expires_at": str(vm.expires_at) if vm.expires_at else None,
                 "purpose": vm.purpose,
+                "ready": vm.ready,
             }
             try:
                 proxmox = get_proxmox_for_server(server)
@@ -213,6 +214,7 @@ async def get_my_vms(
             "created_at": str(vm.created_at) if vm.created_at else None,
             "expires_at": str(vm.expires_at) if vm.expires_at else None,
             "purpose": vm.purpose,
+            "ready": vm.ready,
         }
         try:
             if vm.server_id not in proxmox_cache:
@@ -287,6 +289,7 @@ async def get_vm_status(
             "created_at": str(vm_record.created_at) if vm_record.created_at else None,
             "expires_at": str(vm_record.expires_at) if vm_record.expires_at else None,
             "purpose": vm_record.purpose,
+            "ready": vm_record.ready,
             "node": vm_record.server.name,
             "public_ip": vm_record.server.ip_address,
         }
@@ -472,6 +475,14 @@ async def control_vm(
 ):
     """VM 전원 제어 (시작/중지/재시작) — 소유자 또는 관리자만 가능"""
     vm_record = get_vm_with_owner_check(db, vmid, current_user, node)
+
+    # 생성(클론·cloud-init·스펙 적용) 완료 전에는 전원 제어 차단
+    # — 미완료 상태에서 시작하면 템플릿 원본 그대로 부팅되어 스펙·SSH 계정이 누락됨
+    if not vm_record.ready:
+        raise HTTPException(
+            status_code=409,
+            detail="VM 생성이 아직 완료되지 않았습니다. 잠시 후 다시 시도해주세요.",
+        )
 
     # 만료 유예 기간 VM은 시작/재시작 차단 (관리자 제외) — 연장 시 자동 해제
     if (

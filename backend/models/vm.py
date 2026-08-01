@@ -49,6 +49,9 @@ class Vm(Base):
 
     # 사용 목적 (생성 시 필수 입력, 이후 수정 가능. 기존 VM은 NULL)
     purpose = Column(String, nullable=True)
+
+    # 생성 완료 여부 (클론·cloud-init·스펙 적용까지 끝나야 True) — False인 동안 시작/재시작 차단
+    ready = Column(Boolean, nullable=False, default=True)
     
     # 서버 객체와의 역참조 관계 (ORM을 통해 vm.server 로 해당 서버 정보를 바로 꺼낼 수 있음)
     server = relationship("Server", backref="vms")

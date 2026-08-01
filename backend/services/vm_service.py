@@ -423,6 +423,7 @@ def create_vm(
         vm_password=vm_password,
         expires_at=expires_at,
         purpose=purpose,
+        ready=False,
     )
     db.add(new_vm)
     db.flush()  # new_vm.id 확보
@@ -520,7 +521,8 @@ def create_vm(
         except Exception:
             logger.warning(f"스니펫 삭제 실패 (무시): {snippet_filename}")
 
-        # 11. 성공 알림 저장
+        # 11. 성공 알림 저장 + 생성 완료 표시 (이제부터 시작/재시작 가능)
+        new_vm.ready = True
         db.add(Notification(
             user_id=current_user.id,
             type="success",
