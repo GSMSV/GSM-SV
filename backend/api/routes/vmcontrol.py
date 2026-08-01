@@ -227,10 +227,15 @@ async def get_my_vms(
             info["mem_usage"] = vm_status.get("mem", 0)
             info["maxdisk"] = vm_status.get("maxdisk", 0)
             info["uptime"] = vm_status.get("uptime", 0)
-            uptime = vm_status.get("uptime", 0)
+            # cloud-init은 최초 부팅에만 실행되므로 재부팅 시 리셋되는 게스트 uptime이 아니라
+            # VM 최초 생성 시각(created_at) 기준 경과 시간으로 판단 — 재시작마다 재표시되는 것 방지
+            seconds_since_created = (
+                (now_kst() - vm.created_at).total_seconds() if vm.created_at else None
+            )
             info["provisioning"] = (
                 vm_status.get("status") == "running"
-                and 0 < uptime < PROVISIONING_UPTIME_THRESHOLD_SECONDS
+                and seconds_since_created is not None
+                and 0 < seconds_since_created < PROVISIONING_UPTIME_THRESHOLD_SECONDS
             )
         except Exception:
             pass
@@ -253,24 +258,31 @@ async def get_vm_status(
     try:
         vm_status = proxmox.nodes(node).qemu(vmid).status.current.get()
 
-        # cloud-init 완료 여부 확인 (running 상태일 때만)
+        # cloud-init은 최초 부팅에만 실행되므로 재부팅 시 리셋되는 게스트 uptime이 아니라
+        # VM 최초 생성 시각(created_at) 기준 경과 시간으로 판단 — 재시작마다 재표시되는 것 방지
+        seconds_since_created = (
+            (now_kst() - vm_record.created_at).total_seconds() if vm_record.created_at else None
+        )
+        in_first_boot_window = (
+            seconds_since_created is not None
+            and 0 < seconds_since_created < PROVISIONING_UPTIME_THRESHOLD_SECONDS
+        )
+
+        # cloud-init 완료 여부 확인 (최초 부팅 창 안에서만)
         provisioning = False
-        if vm_status.get("status") == "running":
-            uptime = vm_status.get("uptime", 0)
+        if vm_status.get("status") == "running" and in_first_boot_window:
             try:
+                # guest-exec은 쉘을 거치지 않으므로 &&/|| 를 쓰려면 bash -c로 감싸야 함
                 result = proxmox.nodes(node).qemu(vmid).agent.exec.post(
-                    command="test -f /home/ubuntu/ok.txt && echo OK || echo NOTYET"
+                    command=["/bin/bash", "-c", "test -f /home/ubuntu/ok.txt && echo OK || echo NOTYET"]
                 )
                 pid = result.get("pid")
                 await asyncio.sleep(1)
                 out = proxmox.nodes(node).qemu(vmid).agent("exec-status").get(pid=pid)
                 stdout = base64.b64decode(out.get("out-data", "")).decode(errors="ignore")
-                provisioning = (
-                    "OK" not in stdout
-                    and 0 < uptime < PROVISIONING_UPTIME_THRESHOLD_SECONDS
-                )
+                provisioning = "OK" not in stdout
             except Exception:
-                provisioning = 0 < uptime < PROVISIONING_UPTIME_THRESHOLD_SECONDS
+                provisioning = True
 
         # Proxmox 실시간 데이터 + DB 저장 데이터 통합
         return {
