@@ -284,3 +284,85 @@ class TestReadyGuard:
                 db=db, current_user=user,
             ))
         assert exc_info.value.status_code == 409
+
+    @patch("api.routes.vmcontrol.get_proxmox_for_server")
+    def test_control_vm_blocked_mid_cloud_init(self, mock_proxmox_fn, db, user, server):
+        """최초 부팅 창 안에서 cloud-init 마커 미확인이면 재시작이 409로 차단됨"""
+        from fastapi import HTTPException
+        from starlette.requests import Request
+        from schemas.vm_schema import VMAction
+        from api.routes.vmcontrol import control_vm
+
+        vm = Vm(
+            hypervisor_vmid=501,
+            name="mid-cloud-init-vm",
+            server_id=server.id,
+            owner_id=user.id,
+            ready=True,
+            created_at=now_kst().replace(tzinfo=None),
+        )
+        db.add(vm)
+        db.commit()
+
+        proxmox = MagicMock()
+        proxmox.nodes.return_value.qemu.return_value.status.current.get.return_value = {
+            "status": "running"
+        }
+        # agent exec 실패 → 마커 확인 불가 → 안전하게 "진행 중"으로 간주
+        proxmox.nodes.return_value.qemu.return_value.agent.exec.post.side_effect = Exception("agent down")
+        mock_proxmox_fn.return_value = proxmox
+
+        request = Request(scope={
+            "type": "http", "method": "POST", "path": "/",
+            "headers": [], "client": ("test", 1234),
+        })
+
+        with patch("api.routes.vmcontrol.now_kst", return_value=now_kst().replace(tzinfo=None)):
+            with pytest.raises(HTTPException) as exc_info:
+                asyncio.run(control_vm(
+                    request, "test-node", 501, VMAction(action="reboot"),
+                    db=db, current_user=user,
+                ))
+        assert exc_info.value.status_code == 409
+
+    @patch("api.routes.vmcontrol.get_proxmox_for_server")
+    def test_control_vm_allowed_after_marker_confirmed(self, mock_proxmox_fn, db, user, server):
+        """ok.txt 마커가 확인되면 최초 부팅 창 안이라도 재시작 허용"""
+        from starlette.requests import Request
+        from schemas.vm_schema import VMAction
+        from api.routes.vmcontrol import control_vm
+        import base64
+
+        vm = Vm(
+            hypervisor_vmid=502,
+            name="finished-cloud-init-vm",
+            server_id=server.id,
+            owner_id=user.id,
+            ready=True,
+            created_at=now_kst().replace(tzinfo=None),
+        )
+        db.add(vm)
+        db.commit()
+
+        proxmox = MagicMock()
+        proxmox.nodes.return_value.qemu.return_value.status.current.get.return_value = {
+            "status": "running"
+        }
+        proxmox.nodes.return_value.qemu.return_value.agent.exec.post.return_value = {"pid": 1}
+        proxmox.nodes.return_value.qemu.return_value.agent.return_value.get.return_value = {
+            "out-data": base64.b64encode(b"OK\n").decode()
+        }
+        proxmox.nodes.return_value.qemu.return_value.status.reboot.post.return_value = {"data": "UPID"}
+        mock_proxmox_fn.return_value = proxmox
+
+        request = Request(scope={
+            "type": "http", "method": "POST", "path": "/",
+            "headers": [], "client": ("test", 1234),
+        })
+
+        with patch("api.routes.vmcontrol.now_kst", return_value=now_kst().replace(tzinfo=None)):
+            result = asyncio.run(control_vm(
+                request, "test-node", 502, VMAction(action="reboot"),
+                db=db, current_user=user,
+            ))
+        assert result["success"] is True
