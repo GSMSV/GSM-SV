@@ -169,6 +169,7 @@ async def get_all_vms(
                 "created_at": str(vm.created_at) if vm.created_at else None,
                 "expires_at": str(vm.expires_at) if vm.expires_at else None,
                 "purpose": vm.purpose,
+                "ready": vm.ready,
             }
             try:
                 proxmox = get_proxmox_for_server(server)
@@ -213,6 +214,7 @@ async def get_my_vms(
             "created_at": str(vm.created_at) if vm.created_at else None,
             "expires_at": str(vm.expires_at) if vm.expires_at else None,
             "purpose": vm.purpose,
+            "ready": vm.ready,
         }
         try:
             if vm.server_id not in proxmox_cache:
@@ -225,15 +227,50 @@ async def get_my_vms(
             info["mem_usage"] = vm_status.get("mem", 0)
             info["maxdisk"] = vm_status.get("maxdisk", 0)
             info["uptime"] = vm_status.get("uptime", 0)
-            uptime = vm_status.get("uptime", 0)
+            # cloud-init은 최초 부팅에만 실행되므로 재부팅 시 리셋되는 게스트 uptime이 아니라
+            # VM 최초 생성 시각(created_at) 기준 경과 시간으로 판단 — 재시작마다 재표시되는 것 방지
+            seconds_since_created = (
+                (now_kst() - vm.created_at).total_seconds() if vm.created_at else None
+            )
             info["provisioning"] = (
                 vm_status.get("status") == "running"
-                and 0 < uptime < PROVISIONING_UPTIME_THRESHOLD_SECONDS
+                and seconds_since_created is not None
+                and 0 < seconds_since_created < PROVISIONING_UPTIME_THRESHOLD_SECONDS
             )
         except Exception:
             pass
         result.append(info)
     return result
+
+
+async def _check_cloud_init_provisioning(proxmox, node: str, vmid: int, created_at) -> bool:
+    """cloud-init이 아직 진행 중인지 확인 (최초 부팅 창 안에서만 실제 체크, 밖이면 바로 False).
+
+    cloud-init은 최초 부팅에만 실행되므로 재부팅 시 리셋되는 게스트 uptime이 아니라
+    VM 최초 생성 시각(created_at) 기준 경과 시간으로 창을 판단 — 재시작마다 재표시/재차단되는 것 방지.
+    """
+    seconds_since_created = (
+        (now_kst() - created_at).total_seconds() if created_at else None
+    )
+    in_first_boot_window = (
+        seconds_since_created is not None
+        and 0 < seconds_since_created < PROVISIONING_UPTIME_THRESHOLD_SECONDS
+    )
+    if not in_first_boot_window:
+        return False
+
+    try:
+        # guest-exec은 쉘을 거치지 않으므로 &&/|| 를 쓰려면 bash -c로 감싸야 함
+        result = proxmox.nodes(node).qemu(vmid).agent.exec.post(
+            command=["/bin/bash", "-c", "test -f /home/ubuntu/ok.txt && echo OK || echo NOTYET"]
+        )
+        pid = result.get("pid")
+        await asyncio.sleep(1)
+        out = proxmox.nodes(node).qemu(vmid).agent("exec-status").get(pid=pid)
+        stdout = base64.b64decode(out.get("out-data", "")).decode(errors="ignore")
+        return "OK" not in stdout
+    except Exception:
+        return True
 
 
 @router.get("/{node}/vms/{vmid}/status")
@@ -251,24 +288,11 @@ async def get_vm_status(
     try:
         vm_status = proxmox.nodes(node).qemu(vmid).status.current.get()
 
-        # cloud-init 완료 여부 확인 (running 상태일 때만)
         provisioning = False
         if vm_status.get("status") == "running":
-            uptime = vm_status.get("uptime", 0)
-            try:
-                result = proxmox.nodes(node).qemu(vmid).agent.exec.post(
-                    command="test -f /home/ubuntu/ok.txt && echo OK || echo NOTYET"
-                )
-                pid = result.get("pid")
-                await asyncio.sleep(1)
-                out = proxmox.nodes(node).qemu(vmid).agent("exec-status").get(pid=pid)
-                stdout = base64.b64decode(out.get("out-data", "")).decode(errors="ignore")
-                provisioning = (
-                    "OK" not in stdout
-                    and 0 < uptime < PROVISIONING_UPTIME_THRESHOLD_SECONDS
-                )
-            except Exception:
-                provisioning = 0 < uptime < PROVISIONING_UPTIME_THRESHOLD_SECONDS
+            provisioning = await _check_cloud_init_provisioning(
+                proxmox, node, vmid, vm_record.created_at
+            )
 
         # Proxmox 실시간 데이터 + DB 저장 데이터 통합
         return {
@@ -287,6 +311,7 @@ async def get_vm_status(
             "created_at": str(vm_record.created_at) if vm_record.created_at else None,
             "expires_at": str(vm_record.expires_at) if vm_record.expires_at else None,
             "purpose": vm_record.purpose,
+            "ready": vm_record.ready,
             "node": vm_record.server.name,
             "public_ip": vm_record.server.ip_address,
         }
@@ -473,6 +498,14 @@ async def control_vm(
     """VM 전원 제어 (시작/중지/재시작) — 소유자 또는 관리자만 가능"""
     vm_record = get_vm_with_owner_check(db, vmid, current_user, node)
 
+    # 생성(클론·cloud-init·스펙 적용) 완료 전에는 전원 제어 차단
+    # — 미완료 상태에서 시작하면 템플릿 원본 그대로 부팅되어 스펙·SSH 계정이 누락됨
+    if not vm_record.ready:
+        raise HTTPException(
+            status_code=409,
+            detail="VM 생성이 아직 완료되지 않았습니다. 잠시 후 다시 시도해주세요.",
+        )
+
     # 만료 유예 기간 VM은 시작/재시작 차단 (관리자 제외) — 연장 시 자동 해제
     if (
         action.action in ("start", "reboot")
@@ -487,6 +520,23 @@ async def control_vm(
 
     node = vm_record.server.name
     proxmox = get_proxmox_for_server(vm_record.server)
+
+    # cloud-init 진행 중(최초 부팅 창 + ok.txt 마커 미확인)에 중지/재시작하면
+    # 설정 스크립트가 중간에 끊겨 계정·설정이 절반만 적용될 수 있으므로 차단
+    if action.action in ("stop", "shutdown", "reboot"):
+        try:
+            current_status = proxmox.nodes(node).qemu(vmid).status.current.get()
+        except Exception:
+            current_status = {}
+        if current_status.get("status") == "running":
+            still_provisioning = await _check_cloud_init_provisioning(
+                proxmox, node, vmid, vm_record.created_at
+            )
+            if still_provisioning:
+                raise HTTPException(
+                    status_code=409,
+                    detail="초기 설정(cloud-init)이 진행 중입니다. 완료 후 다시 시도해주세요.",
+                )
 
     try:
         node_qemu = proxmox.nodes(node).qemu(vmid).status

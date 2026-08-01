@@ -7,18 +7,18 @@ DevFest 이후 인스턴스 정책 변경 테스트
 """
 import asyncio
 from datetime import timedelta
+from unittest.mock import MagicMock, patch
 
 import pytest
 from pydantic import ValidationError
-from unittest.mock import patch, MagicMock
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from core.timezone import now_kst
-from core.database import Base
 from core.constants import TIER_SPECS
-from models.user import User, UserRole
+from core.database import Base
+from core.timezone import now_kst
 from models.server import Server
+from models.user import User, UserRole
 from models.vm import Vm
 from schemas.vm_schema import VMCreate, VMPurposeUpdate, VMTier
 from services.vm_service import create_vm
@@ -154,15 +154,18 @@ class TestExtendVm:
     def test_extend_rejected_before_window(self, db, user, server):
         """만료까지 7일 초과 남으면 400."""
         from fastapi import HTTPException
+
         from api.routes.vmcontrol import extend_vm
 
         # SQLite는 naive datetime으로 저장되므로 now_kst도 naive로 패치
         now = now_kst().replace(tzinfo=None)
         self._make_vm(db, user, server, now + timedelta(days=10))
 
-        with patch("api.routes.vmcontrol.now_kst", return_value=now):
-            with pytest.raises(HTTPException) as exc_info:
-                asyncio.run(extend_vm("test-node", 300, db=db, current_user=user))
+        with (
+            patch("api.routes.vmcontrol.now_kst", return_value=now),
+            pytest.raises(HTTPException) as exc_info,
+        ):
+            asyncio.run(extend_vm("test-node", 300, db=db, current_user=user))
         assert exc_info.value.status_code == 400
         assert "만료 7일 전부터" in exc_info.value.detail
 
@@ -226,6 +229,7 @@ class TestPurpose:
 
     def test_update_purpose_other_user_404(self, db, user, server):
         from fastapi import HTTPException
+
         from api.routes.vmcontrol import update_vm_purpose
 
         other = User(
@@ -251,3 +255,124 @@ class TestPurpose:
                 db=db, current_user=other,
             ))
         assert exc_info.value.status_code == 404
+
+
+# ── 생성 미완료 VM 전원 제어 차단 ────────────────────────────
+
+class TestReadyGuard:
+    def test_control_vm_blocked_while_not_ready(self, db, user, server):
+        """ready=False인 VM은 시작/재시작 등 전원 제어가 409로 차단됨"""
+        from fastapi import HTTPException
+        from starlette.requests import Request
+
+        from api.routes.vmcontrol import control_vm
+        from schemas.vm_schema import VMAction
+
+        vm = Vm(
+            hypervisor_vmid=500,
+            name="not-ready-vm",
+            server_id=server.id,
+            owner_id=user.id,
+            ready=False,
+        )
+        db.add(vm)
+        db.commit()
+
+        request = Request(scope={
+            "type": "http", "method": "POST", "path": "/",
+            "headers": [], "client": ("test", 1234),
+        })
+
+        with pytest.raises(HTTPException) as exc_info:
+            asyncio.run(control_vm(
+                request, "test-node", 500, VMAction(action="start"),
+                db=db, current_user=user,
+            ))
+        assert exc_info.value.status_code == 409
+
+    @patch("api.routes.vmcontrol.get_proxmox_for_server")
+    def test_control_vm_blocked_mid_cloud_init(self, mock_proxmox_fn, db, user, server):
+        """최초 부팅 창 안에서 cloud-init 마커 미확인이면 재시작이 409로 차단됨"""
+        from fastapi import HTTPException
+        from starlette.requests import Request
+
+        from api.routes.vmcontrol import control_vm
+        from schemas.vm_schema import VMAction
+
+        vm = Vm(
+            hypervisor_vmid=501,
+            name="mid-cloud-init-vm",
+            server_id=server.id,
+            owner_id=user.id,
+            ready=True,
+            created_at=now_kst().replace(tzinfo=None),
+        )
+        db.add(vm)
+        db.commit()
+
+        proxmox = MagicMock()
+        proxmox.nodes.return_value.qemu.return_value.status.current.get.return_value = {
+            "status": "running"
+        }
+        # agent exec 실패 → 마커 확인 불가 → 안전하게 "진행 중"으로 간주
+        proxmox.nodes.return_value.qemu.return_value.agent.exec.post.side_effect = Exception("agent down")
+        mock_proxmox_fn.return_value = proxmox
+
+        request = Request(scope={
+            "type": "http", "method": "POST", "path": "/",
+            "headers": [], "client": ("test", 1234),
+        })
+
+        with (
+            patch("api.routes.vmcontrol.now_kst", return_value=now_kst().replace(tzinfo=None)),
+            pytest.raises(HTTPException) as exc_info,
+        ):
+            asyncio.run(control_vm(
+                request, "test-node", 501, VMAction(action="reboot"),
+                db=db, current_user=user,
+            ))
+        assert exc_info.value.status_code == 409
+
+    @patch("api.routes.vmcontrol.get_proxmox_for_server")
+    def test_control_vm_allowed_after_marker_confirmed(self, mock_proxmox_fn, db, user, server):
+        """ok.txt 마커가 확인되면 최초 부팅 창 안이라도 재시작 허용"""
+        import base64
+
+        from starlette.requests import Request
+
+        from api.routes.vmcontrol import control_vm
+        from schemas.vm_schema import VMAction
+
+        vm = Vm(
+            hypervisor_vmid=502,
+            name="finished-cloud-init-vm",
+            server_id=server.id,
+            owner_id=user.id,
+            ready=True,
+            created_at=now_kst().replace(tzinfo=None),
+        )
+        db.add(vm)
+        db.commit()
+
+        proxmox = MagicMock()
+        proxmox.nodes.return_value.qemu.return_value.status.current.get.return_value = {
+            "status": "running"
+        }
+        proxmox.nodes.return_value.qemu.return_value.agent.exec.post.return_value = {"pid": 1}
+        proxmox.nodes.return_value.qemu.return_value.agent.return_value.get.return_value = {
+            "out-data": base64.b64encode(b"OK\n").decode()
+        }
+        proxmox.nodes.return_value.qemu.return_value.status.reboot.post.return_value = {"data": "UPID"}
+        mock_proxmox_fn.return_value = proxmox
+
+        request = Request(scope={
+            "type": "http", "method": "POST", "path": "/",
+            "headers": [], "client": ("test", 1234),
+        })
+
+        with patch("api.routes.vmcontrol.now_kst", return_value=now_kst().replace(tzinfo=None)):
+            result = asyncio.run(control_vm(
+                request, "test-node", 502, VMAction(action="reboot"),
+                db=db, current_user=user,
+            ))
+        assert result["success"] is True

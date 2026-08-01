@@ -464,6 +464,7 @@ class TestVMCreationHappyPath:
         assert vm is not None
         assert vm.owner_id == user.id
         assert vm.internal_ip == "10.0.0.100"
+        assert vm.ready is True
 
         # 알림 생성 확인
         notif = db.query(Notification).filter(
