@@ -42,11 +42,12 @@ class TestAddRoute:
         assert result is True
         mock_delete.assert_called_once()
         args, kwargs = mock_post.call_args
-        assert "routes" in args[0]
+        assert args[0].endswith("/routes/0")
         payload = kwargs["json"]
         assert payload["@id"] == "route-myapp"
         assert payload["match"][0]["host"] == ["myapp.https.gsmsv.site"]
         assert payload["handle"][0]["upstreams"][0]["dial"] == "10.0.0.150:8080"
+        assert payload["terminal"] is True
 
     @patch("services.caddy_service.requests.delete")
     @patch("services.caddy_service.requests.post", side_effect=Exception("connection refused"))

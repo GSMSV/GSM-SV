@@ -36,10 +36,13 @@ def add_route(subdomain: str, internal_ip: str, internal_port: int) -> bool:
             "handler": "reverse_proxy",
             "upstreams": [{"dial": f"{internal_ip}:{internal_port}"}],
         }],
+        "terminal": True,
     }
     try:
+        # 배열 끝이 아니라 0번 인덱스에 삽입 — 기존 *.https.gsmsv.site 캐치올(terminal)보다
+        # 먼저 평가되게 해서 새 라우트가 캐치올에 가려지지 않도록 함
         resp = requests.post(
-            f"{settings.CADDY_ADMIN_API_URL}/config/apps/http/servers/srv0/routes",
+            f"{settings.CADDY_ADMIN_API_URL}/config/apps/http/servers/srv0/routes/0",
             json=payload,
             timeout=_ADMIN_API_TIMEOUT,
         )
