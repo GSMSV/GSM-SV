@@ -37,6 +37,7 @@ from models.vm_creation_job import VmCreationJob  # noqa: F401
 from services.vm_creation_queue import start_vm_creation_worker, stop_vm_creation_worker
 from models.faq_question import FaqQuestion  # noqa: F401 — create_all 자동 반영
 from models.vm_port import VmPort  # noqa: F401 — create_all 자동 반영
+from models.https_route import HttpsRoute  # noqa: F401 — create_all 자동 반영
 
 
 import logging
