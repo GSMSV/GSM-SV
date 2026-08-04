@@ -14,6 +14,7 @@ from slowapi.errors import RateLimitExceeded
 from api.routes import (
     vmcontrol,
     firewall,
+    https_gateway,
     auth,
     monitoring,
     network,
@@ -817,6 +818,9 @@ app.include_router(
 )
 app.include_router(
     firewall.router, prefix=f"{settings.API_V1_STR}/firewall", tags=["firewall"]
+)
+app.include_router(
+    https_gateway.router, prefix=f"{settings.API_V1_STR}/https-gateway", tags=["https-gateway"]
 )
 app.include_router(
     monitoring.router, prefix=f"{settings.API_V1_STR}/monitoring", tags=["monitoring"]
