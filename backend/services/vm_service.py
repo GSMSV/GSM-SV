@@ -20,6 +20,8 @@ from services.proxmox_client import get_proxmox_for_server
 from services.network_service import manage_iptables, manage_custom_iptables, calculate_ports
 from models.notification import Notification
 from models.vm_port import VmPort
+from models.https_route import HttpsRoute
+from services import caddy_service
 
 logger = logging.getLogger(__name__)
 
@@ -633,6 +635,14 @@ def delete_vm(
             # 과거 데이터에 VmPort 기본 포트 레코드가 없을 수 있어 기존 계산식도 fallback으로 수행
             if not has_default_ports:
                 manage_iptables(server, vmid, vm_record.internal_ip, action="DELETE")
+
+        # HTTPS 라우트 정리 — Caddy에서 먼저 제거, DB row는 Vm cascade가 처리
+        https_routes = db.query(HttpsRoute).filter(HttpsRoute.vm_id == vm_record.id).all()
+        for route in https_routes:
+            if not caddy_service.delete_route(route.subdomain):
+                logger.error(
+                    f"VM {vmid} HTTPS 라우트 Caddy 삭제 실패 — {route.subdomain} (DB는 계속 정리)"
+                )
 
         # VmPort 레코드 일괄 삭제 (VM record 삭제 전 FK 제약 해소)
         db.query(VmPort).filter(VmPort.vm_id == vm_record.id).delete()
