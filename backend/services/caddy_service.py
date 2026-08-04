@@ -28,6 +28,7 @@ def _route_id(subdomain: str) -> str:
 def add_route(subdomain: str, internal_ip: str, internal_port: int) -> bool:
     """Caddy Admin API에 reverse_proxy 라우트 등록. 실패해도 예외를 던지지 않고 False 반환"""
     full_domain = f"{subdomain}.{settings.CADDY_HTTPS_DOMAIN_SUFFIX}"
+    delete_route(subdomain)  # 고아 라우트 선점 해제 — 실패해도 무시(항상 bool 반환, 예외 없음)
     payload = {
         "@id": _route_id(subdomain),
         "match": [{"host": [full_domain]}],

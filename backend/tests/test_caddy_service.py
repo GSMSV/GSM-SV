@@ -31,13 +31,16 @@ class TestValidateSubdomain:
 
 
 class TestAddRoute:
+    @patch("services.caddy_service.requests.delete")
     @patch("services.caddy_service.requests.post")
-    def test_success_posts_correct_payload(self, mock_post):
+    def test_success_posts_correct_payload(self, mock_post, mock_delete):
         mock_post.return_value = MagicMock(status_code=200, raise_for_status=lambda: None)
+        mock_delete.return_value = MagicMock(status_code=200, raise_for_status=lambda: None)
 
         result = add_route("myapp", "10.0.0.150", 8080)
 
         assert result is True
+        mock_delete.assert_called_once()
         args, kwargs = mock_post.call_args
         assert "routes" in args[0]
         payload = kwargs["json"]
@@ -45,10 +48,26 @@ class TestAddRoute:
         assert payload["match"][0]["host"] == ["myapp.https.gsmsv.site"]
         assert payload["handle"][0]["upstreams"][0]["dial"] == "10.0.0.150:8080"
 
+    @patch("services.caddy_service.requests.delete")
     @patch("services.caddy_service.requests.post", side_effect=Exception("connection refused"))
-    def test_failure_returns_false_without_raising(self, mock_post):
+    def test_failure_returns_false_without_raising(self, mock_post, mock_delete):
+        mock_delete.return_value = MagicMock(status_code=200, raise_for_status=lambda: None)
         result = add_route("myapp", "10.0.0.150", 8080)
         assert result is False
+
+    @patch("services.caddy_service.requests.delete")
+    @patch("services.caddy_service.requests.post")
+    def test_deletes_existing_route_before_posting(self, mock_post, mock_delete):
+        calls = []
+        mock_post.side_effect = lambda *a, **k: calls.append("post") or MagicMock(status_code=200, raise_for_status=lambda: None)
+        mock_delete.side_effect = lambda *a, **k: calls.append("delete") or MagicMock(status_code=200, raise_for_status=lambda: None)
+
+        result = add_route("myapp", "10.0.0.150", 8080)
+
+        assert result is True
+        assert calls == ["delete", "post"]
+        args, _ = mock_delete.call_args
+        assert args[0].endswith("/id/route-myapp")
 
 
 class TestDeleteRoute:
