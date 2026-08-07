@@ -20,6 +20,8 @@ from services.proxmox_client import get_proxmox_for_server
 from services.network_service import manage_iptables, manage_custom_iptables, calculate_ports
 from models.notification import Notification
 from models.vm_port import VmPort
+from models.https_route import HttpsRoute
+from services import caddy_service
 
 logger = logging.getLogger(__name__)
 
@@ -509,17 +511,12 @@ def create_vm(
         # 9. VM 부팅
         proxmox.nodes(server.name).qemu(vmid).status.start.post()
 
-        # 10. cicustom 해제 + 스니펫 정리 (cloud-init은 첫 부팅에만 적용)
-        try:
-            proxmox.nodes(server.name).qemu(vmid).config.put(delete="cicustom")
-            logger.info(f"VM {vmid} cicustom 해제 완료")
-        except Exception as e:
-            logger.warning(f"VM {vmid} cicustom 해제 실패 (무시): {e}")
-
-        try:
-            _delete_snippet(server, snippet_filename)
-        except Exception:
-            logger.warning(f"스니펫 삭제 실패 (무시): {snippet_filename}")
+        # 10. cicustom·스니펫은 삭제하지 않고 유지한다.
+        #     Proxmox의 cloud-init instance-id는 user-data+network-data 해시값이라
+        #     cicustom을 지우면 config가 바뀌어 instance-id도 바뀌고, 그 결과 다음 재부팅마다
+        #     cloud-init이 "새 인스턴스"로 인식해 최초 부팅 전용 모듈을 매번 재실행한다
+        #     (SSH 호스트 키 재생성 등). config를 그대로 두면 instance-id가 고정되어
+        #     cloud-init이 진짜로 최초 1회만 실행된다.
 
         # 11. 성공 알림 저장 + 생성 완료 표시 (이제부터 시작/재시작 가능)
         new_vm.ready = True
@@ -638,6 +635,14 @@ def delete_vm(
             # 과거 데이터에 VmPort 기본 포트 레코드가 없을 수 있어 기존 계산식도 fallback으로 수행
             if not has_default_ports:
                 manage_iptables(server, vmid, vm_record.internal_ip, action="DELETE")
+
+        # HTTPS 라우트 정리 — Caddy에서 먼저 제거, DB row는 Vm cascade가 처리
+        https_routes = db.query(HttpsRoute).filter(HttpsRoute.vm_id == vm_record.id).all()
+        for route in https_routes:
+            if not caddy_service.delete_route(route.subdomain):
+                logger.error(
+                    f"VM {vmid} HTTPS 라우트 Caddy 삭제 실패 — {route.subdomain} (DB는 계속 정리)"
+                )
 
         # VmPort 레코드 일괄 삭제 (VM record 삭제 전 FK 제약 해소)
         db.query(VmPort).filter(VmPort.vm_id == vm_record.id).delete()
