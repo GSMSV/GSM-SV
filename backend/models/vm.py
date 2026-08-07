@@ -57,6 +57,8 @@ class Vm(Base):
     server = relationship("Server", backref="vms")
     # 소유자 객체와의 역참조 관계
     owner = relationship("User", backref="vms")
+    # HTTPS 게이트웨이 라우트 — VM 삭제 시 DB row도 함께 정리
+    https_routes = relationship("HttpsRoute", cascade="all, delete-orphan")
 
     # ── VM 비밀번호 암호화 프로퍼티 ──────────────────────────
     @property
