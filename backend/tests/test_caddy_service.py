@@ -30,43 +30,77 @@ class TestValidateSubdomain:
             validate_subdomain("admin")
 
 
+def _make_get_mock(existing_routes):
+    # json=lambda가 매번 새 리스트를 반환하게 해서, add_route()의 routes.insert(0, ...)가
+    # 테스트가 들고 있는 원본 existing_routes를 제자리 변형하지 않도록 함
+    return MagicMock(
+        status_code=200,
+        raise_for_status=lambda: None,
+        json=lambda: list(existing_routes) if existing_routes is not None else None,
+    )
+
+
 class TestAddRoute:
     @patch("services.caddy_service.requests.delete")
-    @patch("services.caddy_service.requests.post")
-    def test_success_posts_correct_payload(self, mock_post, mock_delete):
-        mock_post.return_value = MagicMock(status_code=200, raise_for_status=lambda: None)
+    @patch("services.caddy_service.requests.patch")
+    @patch("services.caddy_service.requests.get")
+    def test_success_prepends_via_get_then_patch(self, mock_get, mock_patch, mock_delete):
+        existing = [{"@id": "route-other", "match": [{"host": ["other.https.gsmsv.site"]}]}]
+        mock_get.return_value = _make_get_mock(existing)
+        mock_patch.return_value = MagicMock(status_code=200, raise_for_status=lambda: None)
         mock_delete.return_value = MagicMock(status_code=200, raise_for_status=lambda: None)
 
         result = add_route("myapp", "10.0.0.150", 8080)
 
         assert result is True
         mock_delete.assert_called_once()
-        args, kwargs = mock_post.call_args
-        assert args[0].endswith("/routes/0")
-        payload = kwargs["json"]
-        assert payload["@id"] == "route-myapp"
-        assert payload["match"][0]["host"] == ["myapp.https.gsmsv.site"]
-        assert payload["handle"][0]["upstreams"][0]["dial"] == "10.0.0.150:8080"
-        assert payload["terminal"] is True
+        mock_get.assert_called_once()
+        assert mock_get.call_args[0][0].endswith("/routes")
+
+        args, kwargs = mock_patch.call_args
+        assert args[0].endswith("/routes")
+        new_routes = kwargs["json"]
+        assert new_routes[0]["@id"] == "route-myapp"
+        assert new_routes[0]["match"][0]["host"] == ["myapp.https.gsmsv.site"]
+        assert new_routes[0]["handle"][0]["upstreams"][0]["dial"] == "10.0.0.150:8080"
+        assert new_routes[0]["terminal"] is True
+        assert new_routes[1] == existing[0]  # 기존 라우트는 뒤로 밀림, 유지됨
 
     @patch("services.caddy_service.requests.delete")
-    @patch("services.caddy_service.requests.post", side_effect=Exception("connection refused"))
-    def test_failure_returns_false_without_raising(self, mock_post, mock_delete):
+    @patch("services.caddy_service.requests.patch")
+    @patch("services.caddy_service.requests.get")
+    def test_empty_routes_array_handled(self, mock_get, mock_patch, mock_delete):
+        mock_get.return_value = _make_get_mock(None)  # 라우트가 아예 없으면 null
+        mock_patch.return_value = MagicMock(status_code=200, raise_for_status=lambda: None)
+        mock_delete.return_value = MagicMock(status_code=200, raise_for_status=lambda: None)
+
+        result = add_route("myapp", "10.0.0.150", 8080)
+
+        assert result is True
+        new_routes = mock_patch.call_args[1]["json"]
+        assert len(new_routes) == 1
+        assert new_routes[0]["@id"] == "route-myapp"
+
+    @patch("services.caddy_service.requests.delete")
+    @patch("services.caddy_service.requests.get", side_effect=Exception("connection refused"))
+    def test_failure_returns_false_without_raising(self, mock_get, mock_delete):
         mock_delete.return_value = MagicMock(status_code=200, raise_for_status=lambda: None)
         result = add_route("myapp", "10.0.0.150", 8080)
         assert result is False
 
     @patch("services.caddy_service.requests.delete")
-    @patch("services.caddy_service.requests.post")
-    def test_deletes_existing_route_before_posting(self, mock_post, mock_delete):
+    @patch("services.caddy_service.requests.patch")
+    @patch("services.caddy_service.requests.get")
+    def test_deletes_existing_route_before_get(self, mock_get, mock_patch, mock_delete):
         calls = []
-        mock_post.side_effect = lambda *a, **k: calls.append("post") or MagicMock(status_code=200, raise_for_status=lambda: None)
+        mock_get.side_effect = lambda *a, **k: calls.append("get") or _make_get_mock([])
+        mock_patch.side_effect = lambda *a, **k: calls.append("patch") or MagicMock(status_code=200, raise_for_status=lambda: None)
         mock_delete.side_effect = lambda *a, **k: calls.append("delete") or MagicMock(status_code=200, raise_for_status=lambda: None)
 
         result = add_route("myapp", "10.0.0.150", 8080)
 
         assert result is True
-        assert calls == ["delete", "post"]
+        assert calls == ["delete", "get", "patch"]
         args, _ = mock_delete.call_args
         assert args[0].endswith("/id/route-myapp")
 

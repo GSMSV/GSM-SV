@@ -25,11 +25,21 @@ def _route_id(subdomain: str) -> str:
     return f"route-{subdomain}"
 
 
+def _routes_url() -> str:
+    return f"{settings.CADDY_ADMIN_API_URL}/config/apps/http/servers/srv0/routes"
+
+
 def add_route(subdomain: str, internal_ip: str, internal_port: int) -> bool:
-    """Caddy Admin API에 reverse_proxy 라우트 등록. 실패해도 예외를 던지지 않고 False 반환"""
+    """Caddy Admin API에 reverse_proxy 라우트 등록. 실패해도 예외를 던지지 않고 False 반환
+
+    POST(끝에 append)나 POST .../routes/{index}(인덱스 삽입)는 이 라우트가
+    기존 *.https.gsmsv.site 캐치올(terminal) 뒤에 붙어 가려지는 문제가 있어
+    GET으로 전체 배열을 받아 맨 앞에 새 라우트를 끼워넣고 PATCH로 통째로
+    교체하는 방식을 쓴다 — 순서가 확정적으로 보장됨.
+    """
     full_domain = f"{subdomain}.{settings.CADDY_HTTPS_DOMAIN_SUFFIX}"
     delete_route(subdomain)  # 고아 라우트 선점 해제 — 실패해도 무시(항상 bool 반환, 예외 없음)
-    payload = {
+    new_route = {
         "@id": _route_id(subdomain),
         "match": [{"host": [full_domain]}],
         "handle": [{
@@ -39,13 +49,13 @@ def add_route(subdomain: str, internal_ip: str, internal_port: int) -> bool:
         "terminal": True,
     }
     try:
-        # 배열 끝이 아니라 0번 인덱스에 삽입 — 기존 *.https.gsmsv.site 캐치올(terminal)보다
-        # 먼저 평가되게 해서 새 라우트가 캐치올에 가려지지 않도록 함
-        resp = requests.post(
-            f"{settings.CADDY_ADMIN_API_URL}/config/apps/http/servers/srv0/routes/0",
-            json=payload,
-            timeout=_ADMIN_API_TIMEOUT,
-        )
+        routes_url = _routes_url()
+        current = requests.get(routes_url, timeout=_ADMIN_API_TIMEOUT)
+        current.raise_for_status()
+        routes = current.json() or []
+        routes.insert(0, new_route)
+
+        resp = requests.patch(routes_url, json=routes, timeout=_ADMIN_API_TIMEOUT)
         resp.raise_for_status()
         return True
     except Exception as e:
