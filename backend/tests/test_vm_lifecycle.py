@@ -813,6 +813,46 @@ class TestVMCreationQueue:
         assert job.result["vmid"] == 301
         assert job.message is not None
 
+    @patch("services.vm_creation_queue.create_vm")
+    @patch("services.vm_creation_queue.SessionLocal", new=TestSession)
+    def test_failed_job_hides_internal_error_detail(self, mock_create_vm, db, user, server):
+        """DB 오류 등 내부 예외는 SQL·스키마를 노출하지 않고 일반 문구로 기록한다."""
+        from sqlalchemy.exc import IntegrityError
+
+        vm_config = VMCreate(tier=VMTier.BASIC, purpose="테스트용", node_name=server.name)
+        queued = enqueue_vm_creation(db=db, current_user=user, vm_config=vm_config)
+        mock_create_vm.side_effect = IntegrityError(
+            "INSERT INTO vm_ports (vm_id, external_port) VALUES (%s, %s)",
+            {"external_port": 24159},
+            Exception('duplicate key value violates unique constraint "vm_ports_external_port_key"'),
+        )
+
+        process_vm_creation_job(queued.job_id)
+
+        job = db.query(VmCreationJob).filter(VmCreationJob.id == queued.job_id).first()
+        db.refresh(job)
+        assert job.status == "failed"
+        assert job.error_message == "VM 생성에 실패했습니다. 잠시 후 다시 시도해주세요."
+        assert "vm_ports" not in job.error_message
+
+    @patch("services.vm_creation_queue.create_vm")
+    @patch("services.vm_creation_queue.SessionLocal", new=TestSession)
+    def test_failed_job_keeps_http_exception_detail(self, mock_create_vm, db, user, server):
+        """HTTPException의 detail은 사용자 안내 문구이므로 그대로 기록한다."""
+        from fastapi import HTTPException as FastAPIHTTPException
+
+        vm_config = VMCreate(tier=VMTier.BASIC, purpose="테스트용", node_name=server.name)
+        queued = enqueue_vm_creation(db=db, current_user=user, vm_config=vm_config)
+        detail = "서버 자원이 부족합니다 (RAM 85.0% 점유 중). 80.0% 미만으로 내려오면 다시 시도해주세요."
+        mock_create_vm.side_effect = FastAPIHTTPException(status_code=507, detail=detail)
+
+        process_vm_creation_job(queued.job_id)
+
+        job = db.query(VmCreationJob).filter(VmCreationJob.id == queued.job_id).first()
+        db.refresh(job)
+        assert job.status == "failed"
+        assert job.error_message == detail
+
     def test_job_access_is_owner_only_or_admin(self, db, user, admin_user, server):
         vm_config = VMCreate(tier=VMTier.BASIC, purpose="테스트용", node_name=server.name, name="owner-vm")
         queued = enqueue_vm_creation(db=db, current_user=user, vm_config=vm_config)
