@@ -64,7 +64,7 @@ def _generate_vm_name(user: User, tier: str, custom_name: str = None) -> tuple[s
         safe_name = _sanitize_dns_name(custom_name)
         return f"{username}-{safe_name}", custom_name
     suffix = ''.join(secrets.choice(string.ascii_lowercase + string.digits) for _ in range(4))
-    short = f"{tier}-{suffix}"
+    short = f"{_sanitize_dns_name(tier)}-{suffix}"
     return f"{username}-{short}", short
 
 
