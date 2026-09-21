@@ -32,6 +32,7 @@ from services.vm_service import (
     delete_vm,
     _allocate_internal_ip,
     _get_next_vmid,
+    _select_vmid,
 )
 from services.network_service import calculate_ports, manage_iptables
 from services.mon_service import update_server_stats
@@ -609,6 +610,78 @@ class TestVMIDRetry:
         proxmox.cluster.nextid.get.side_effect = Exception("API error")
         proxmox.nodes.return_value.qemu.get.return_value = []
         assert _get_next_vmid(proxmox, "node1") == 100
+
+
+class TestVMIDSelection:
+    """_select_vmid — 기본 외부 포트·VMID 충돌 시 다음 VMID로 건너뛰기"""
+
+    def test_returns_nextid_when_no_conflict(self, db, server):
+        proxmox = _make_mock_proxmox(159)
+        assert _select_vmid(db, proxmox, server) == 159
+
+    def test_skips_vmid_whose_default_port_is_taken(self, db, server):
+        """공식과 다른 옛 포트 레코드(다른 노드 VM)가 계산 포트를 점유하면 다음 VMID 사용"""
+        db.add(VmPort(vm_id=9999, internal_port=80, external_port=21000 + 159, is_default=True))
+        db.commit()
+        proxmox = _make_mock_proxmox(159)
+        assert _select_vmid(db, proxmox, server) == 160
+
+    def test_skips_vmid_with_existing_vm_record_on_same_node(self, db, user, server):
+        db.add(Vm(hypervisor_vmid=200, name="orphan", server_id=server.id, owner_id=user.id))
+        db.commit()
+        proxmox = _make_mock_proxmox(200)
+        assert _select_vmid(db, proxmox, server) == 201
+
+    def test_skips_vmid_used_in_proxmox(self, db, server):
+        from proxmoxer.core import ResourceException
+
+        db.add(VmPort(vm_id=9999, internal_port=22, external_port=21000 + 300, is_default=True))
+        db.commit()
+
+        def fake_nextid(vmid=None):
+            if vmid is None:
+                return "300"
+            if vmid == 301:
+                raise ResourceException(400, "Bad Request", "VM 301 already exists")
+            return str(vmid)
+
+        proxmox = MagicMock()
+        proxmox.cluster.nextid.get.side_effect = fake_nextid
+        assert _select_vmid(db, proxmox, server) == 302
+
+    def test_raises_507_when_all_candidates_conflict(self, db, server):
+        from fastapi import HTTPException as FastAPIHTTPException
+
+        for vmid in range(159, 162):
+            db.add(VmPort(vm_id=9999, internal_port=22, external_port=21000 + vmid, is_default=True))
+        db.commit()
+        proxmox = _make_mock_proxmox(159)
+
+        with patch("services.vm_service._MAX_VMID_PROBES", 3):
+            with pytest.raises(FastAPIHTTPException) as exc_info:
+                _select_vmid(db, proxmox, server)
+        assert exc_info.value.status_code == 507
+
+    @patch("services.vm_service._delete_snippet")
+    @patch("services.vm_service._upload_snippet")
+    @patch("services.vm_service.manage_iptables", return_value=True)
+    @patch("services.vm_service.get_proxmox_for_server")
+    @patch("services.vm_service._allocate_internal_ip", return_value="10.0.0.100")
+    def test_create_vm_avoids_port_collision(
+        self, mock_alloc, mock_proxmox_fn, mock_iptables,
+        mock_upload, mock_del_snippet, db, user, server
+    ):
+        """운영 재현: nextid VMID의 SSH 포트가 이미 점유돼 있어도 UniqueViolation 없이 다음 VMID로 생성"""
+        db.add(VmPort(vm_id=9999, internal_port=80, external_port=21000 + 159, is_default=True))
+        db.commit()
+        mock_proxmox_fn.return_value = _make_mock_proxmox(159)
+
+        result = create_vm(db, user, VMTier.BASIC, node_name="test-node")
+
+        assert result["vmid"] == 160
+        vm = db.query(Vm).filter(Vm.hypervisor_vmid == 160).first()
+        ports = {p.external_port for p in db.query(VmPort).filter(VmPort.vm_id == vm.id).all()}
+        assert ports == {21160, 22160, 23160}
 
 
 class TestBestServerRoleFilters:

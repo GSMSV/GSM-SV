@@ -15,7 +15,7 @@ from models.user import User, UserRole
 from models.vm import Vm
 from models.vm_port import VmPort
 from schemas.fw_schema import VmPortCreate
-from api.routes.firewall import add_custom_port
+from api.routes.firewall import add_custom_port, restore_default_ports
 from services.network_service import allocate_random_port, manage_custom_iptables
 
 
@@ -260,6 +260,35 @@ class TestAddCustomPortRollback:
 
         assert exc_info.value.status_code == 400
         assert db.query(VmPort).count() == 0
+
+
+class TestRestoreDefaultPorts:
+    """기본 포트 복원 — 복원할 외부 포트가 이미 쓰이면 409"""
+
+    _make_user_vm = TestAddCustomPortRollback._make_user_vm
+
+    def test_restores_missing_default_ports(self, db):
+        user = self._make_user_vm(db)
+
+        with patch("api.routes.firewall.manage_custom_iptables", return_value=True):
+            result = asyncio.run(restore_default_ports("test-node", 200, db=db, current_user=user))
+
+        assert result == {"restored": 3}
+        assert {p.external_port for p in db.query(VmPort).all()} == {21200, 22200, 23200}
+
+    def test_conflicting_port_returns_409_without_iptables(self, db):
+        user = self._make_user_vm(db)
+        db.add(VmPort(vm_id=9999, internal_port=80, external_port=22200, is_default=True))
+        db.commit()
+
+        with patch("api.routes.firewall.manage_custom_iptables") as mock_iptables:
+            with pytest.raises(HTTPException) as exc_info:
+                asyncio.run(restore_default_ports("test-node", 200, db=db, current_user=user))
+
+        assert exc_info.value.status_code == 409
+        assert "22200" in exc_info.value.detail
+        mock_iptables.assert_not_called()
+        assert db.query(VmPort).count() == 1
 
 
 # ── 수동 스모크 테스트 ─────────────────────────────────────────────────────────
