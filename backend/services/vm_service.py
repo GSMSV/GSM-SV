@@ -9,6 +9,7 @@ from datetime import timedelta
 from core.timezone import now_kst
 
 from fastapi import HTTPException, status
+from proxmoxer.core import ResourceException
 from sqlalchemy import event, text
 from sqlalchemy.orm import Session
 from core.config import settings
@@ -29,6 +30,7 @@ _IP_ALLOCATION_LOCK_KEY = 0x47534D53
 _FALLBACK_LOCK_TIMEOUT_SECONDS = 10.0
 _fallback_ip_allocation_lock = threading.Lock()
 _FALLBACK_LOCK_INFO_KEY = "internal_ip_allocation_lock_held"
+_MAX_VMID_PROBES = 50
 
 # ── 헬퍼 함수 ──────────────────────────────────────────────
 
@@ -78,6 +80,45 @@ def _get_next_vmid(proxmox, node_name: str) -> int:
             return 100
         max_id = max(vm.get('vmid', 100) for vm in vms)
         return max_id + 1
+
+
+def _is_vmid_free_in_proxmox(proxmox, node_name: str, vmid: int) -> bool:
+    """지정 VMID가 Proxmox에서 비어 있는지 확인합니다."""
+    try:
+        proxmox.cluster.nextid.get(vmid=vmid)
+        return True
+    except ResourceException:
+        return False  # API는 응답했고 이미 사용 중인 VMID
+    except Exception:
+        # nextid API를 쓸 수 없는 환경 — _get_next_vmid fallback과 같은 기준(노드 VM 목록)으로 확인
+        vms = proxmox.nodes(node_name).qemu.get()
+        return all(int(vm.get("vmid", -1)) != vmid for vm in vms)
+
+
+def _vmid_conflicts_in_db(db: Session, server: Server, vmid: int) -> bool:
+    """같은 노드의 VM 레코드나 공식으로 계산한 기본 외부 포트가 이미 DB에 있는지 확인합니다."""
+    if db.query(Vm.id).filter(Vm.server_id == server.id, Vm.hypervisor_vmid == vmid).first():
+        return True
+    ports = list(calculate_ports(server.base_port, vmid).values())
+    return db.query(VmPort.id).filter(VmPort.external_port.in_(ports)).first() is not None
+
+
+def _select_vmid(db: Session, proxmox, server: Server) -> int:
+    """
+    nextid부터 차례로 검사해 DB·Proxmox 모두에서 충돌하지 않는 VMID를 고릅니다.
+    base_port 변경·수동 등록 등으로 현재 포트 공식과 다른 포트 레코드가 남아 있을 수 있어,
+    기본 외부 포트가 이미 쓰이는 VMID는 건너뜁니다. (건너뛰지 않으면 nextid가 같은 값을 계속 반환해 생성이 영구 실패)
+    """
+    vmid = _get_next_vmid(proxmox, server.name)
+    for _ in range(_MAX_VMID_PROBES):
+        if not _vmid_conflicts_in_db(db, server, vmid) and _is_vmid_free_in_proxmox(proxmox, server.name, vmid):
+            return vmid
+        logger.warning(f"VMID {vmid} ({server.name}) 건너뜀 — 기본 외부 포트 또는 VMID가 이미 사용 중")
+        vmid += 1
+    raise HTTPException(
+        status_code=status.HTTP_507_INSUFFICIENT_STORAGE,
+        detail="할당 가능한 VMID/포트가 없습니다. 관리자에게 문의하세요.",
+    )
 
 
 def _release_fallback_ip_allocation_lock(session: Session) -> None:
@@ -401,7 +442,7 @@ def create_vm(
 
     # 3. Proxmox 연결 & VMID 할당 (IP 락 취득 전에 완료)
     proxmox = get_proxmox_for_server(server)
-    vmid = _get_next_vmid(proxmox, server.name)
+    vmid = _select_vmid(db, proxmox, server)
     vm_name, vm_display_name = _generate_vm_name(current_user, tier.value, custom_name=name)
     vm_password = _generate_password()
 
