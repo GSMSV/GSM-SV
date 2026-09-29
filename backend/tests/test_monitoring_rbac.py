@@ -2,19 +2,20 @@
 모니터링 RBAC 테스트 (MONITORING-TC-01 ~ 04)
 Proxmox 호출은 mock 처리, DB는 SQLite 인메모리 사용
 """
-import pytest
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event
 from unittest.mock import MagicMock, patch
+
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from core.database import Base, get_db
 from api.dependencies import get_current_user
-from models.user import User, UserRole
+from core.database import Base, get_db
 from models.server import Server
+from models.user import User, UserRole
 from models.vm import Vm
 
 TEST_DB_URL = "sqlite:///./test_monitoring.db"
@@ -49,8 +50,7 @@ def get_test_app():
 def setup_db():
     from api.routes import monitoring
 
-    if hasattr(monitoring, "_node_stats_cache"):
-        monitoring._node_stats_cache.clear()
+    getattr(monitoring, "_node_stats_cache", {}).clear()
     Base.metadata.create_all(bind=engine)
     yield
     Base.metadata.drop_all(bind=engine)
