@@ -86,12 +86,18 @@ def _run_iptables_commands(
     success = True
     for cmd in commands:
         logger.info(f"Executing iptables command: {cmd}")
-        _, stdout_ch, stderr_ch = ssh.exec_command(cmd)
-        exit_status = stdout_ch.channel.recv_exit_status()
-        if exit_status != 0:
-            err = stderr_ch.read().decode()
-            logger.error(f"iptables command failed (exit {exit_status}): {err}")
+        try:
+            _, stdout_ch, stderr_ch = ssh.exec_command(cmd)
+            exit_status = stdout_ch.channel.recv_exit_status()
+            if exit_status != 0:
+                err = stderr_ch.read().decode()
+                logger.error(f"iptables command failed (exit {exit_status}): {err}")
+                success = False
+        except Exception as e:
+            # SSH 채널 오류도 앞서 적용된 규칙을 남기지 않도록 rollback 경로로 보냅니다.
+            logger.error(f"iptables command error: {e}")
             success = False
+            break
 
     if not success and rollback_commands:
         for cmd in rollback_commands:

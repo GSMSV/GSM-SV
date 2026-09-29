@@ -208,6 +208,29 @@ class TestManageCustomIptables:
         assert any("PREROUTING" in c and "-D" in c for c in executed_cmds)
         assert any("FORWARD" in c and "-D" in c for c in executed_cmds)
 
+    @patch("services.network_service.paramiko.SSHClient")
+    def test_add_ssh_error_after_dnat_rolls_back_before_returning_failure(self, mock_ssh_cls):
+        ssh = MagicMock()
+        ssh.exec_command.side_effect = [
+            _make_command_result(0),  # PREROUTING added
+            OSError("FORWARD SSH channel closed"),
+            _make_command_result(0),  # rollback PREROUTING
+            _make_command_result(0),  # rollback FORWARD (may have applied remotely)
+        ]
+        mock_ssh_cls.return_value = ssh
+
+        result = manage_custom_iptables(
+            server=_make_server(), vm_ip="10.0.0.5", internal_port=443,
+            external_port=31234, protocol="tcp", action="ADD",
+        )
+
+        assert result is False
+        commands = [call.args[0] for call in ssh.exec_command.call_args_list]
+        assert len(commands) == 4
+        assert "-D PREROUTING" in commands[2]
+        assert "-D FORWARD" in commands[3]
+        ssh.close.assert_called_once()
+
 
 class TestAddCustomPortRollback:
     """커스텀 포트 추가 실패 시 DB 선점 레코드 rollback"""
