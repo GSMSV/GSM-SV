@@ -1,0 +1,9 @@
+# HTTP trigger tokens
+
+`POST /functions/:id/triggers` with `{"type":"http","httpMethod":"POST"}` returns a 64-character hexadecimal `secretToken` **only in the creation response** (201). Store it in a secret manager; it cannot be retrieved later. Invoke the gateway with `X-Secret-Token: <token>`. Query-string tokens are not accepted because URLs are routinely logged. Never put the token in the function body. Trigger `GET`/`PUT` responses omit both the token and its SHA-256 digest. Cron triggers receive no token.
+
+Existing triggers with a null `secretTokenHash` remain publicly callable. Newly created HTTP triggers always receive a token. For multiple enabled triggers, an exact HTTP method takes precedence over `ANY`; within the selected method, a protected trigger takes precedence over a legacy public trigger. To protect an old endpoint, recreate its HTTP trigger and retain the new token; simply upgrading does not revoke its public access.
+
+The additive Prisma migration `20260929000000_http_trigger_token` adds a nullable column. The service startup's `setupDb()` also executes `ADD COLUMN IF NOT EXISTS`, which upgrades databases previously created by `setup-db.ts` even when Prisma migrations are not run (independent of #114). Deploy the new application and schema together: `setupDb()` adds the column before scheduler loading or the HTTP listener starts. **Do not roll back to an old gateway after creating protected triggers**: old code ignores hashes and would expose those triggers publicly. Disable protected triggers or remove their gateway access before rollback; keep the column for a forward re-deploy.
+
+Run `npx prisma generate && npx tsx --test test/*.test.ts && npx tsc --noEmit` from `serverless/`. Database-backed migration testing requires a running PostgreSQL instance; unit tests assert the startup upgrade order but do not replace a real migration rehearsal.

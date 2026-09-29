@@ -30,14 +30,15 @@ model Function {
 }
 
 model Trigger {
-  id         String   @id @default(cuid())
-  functionId String
-  type       String
-  httpMethod String?  @default("ANY")
-  cronExpr   String?
-  enabled    Boolean  @default(true)
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
+  id              String   @id @default(cuid())
+  functionId      String
+  type            String
+  httpMethod      String?  @default("ANY")
+  cronExpr        String?
+  secretTokenHash String?
+  enabled         Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
 
   function   Function @relation(fields: [functionId], references: [id], onDelete: Cascade)
 

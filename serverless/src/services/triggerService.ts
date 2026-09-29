@@ -1,5 +1,6 @@
 import { prisma } from "../db/prisma";
 import { scheduler } from "./schedulerService";
+import { createHttpTriggerToken, redactTrigger } from "./triggerAuth";
 
 export async function createTrigger(functionId: string, data: {
   type: string;
@@ -7,11 +8,12 @@ export async function createTrigger(functionId: string, data: {
   cronExpr?: string;
   enabled?: boolean;
 }) {
-  const trigger = await prisma.trigger.create({ data: { functionId, ...data } });
+  const credential = data.type === "http" ? createHttpTriggerToken() : undefined;
+  const trigger = await prisma.trigger.create({ data: { functionId, ...data, ...(credential && { secretTokenHash: credential.secretTokenHash }) } });
   if (trigger.type === "cron" && trigger.enabled) {
     await scheduler.addTrigger(trigger.id);
   }
-  return trigger;
+  return { ...redactTrigger(trigger), ...(credential && { secretToken: credential.token }) };
 }
 
 export async function updateTrigger(id: string, data: Partial<{
@@ -23,7 +25,7 @@ export async function updateTrigger(id: string, data: Partial<{
   if (trigger.type === "cron") {
     await scheduler.reloadTrigger(id);
   }
-  return trigger;
+  return redactTrigger(trigger);
 }
 
 export async function deleteTrigger(id: string) {

@@ -3,6 +3,7 @@ import { requireAuth } from "../middleware/auth";
 import { assertOwnership } from "../services/functionService";
 import { prisma } from "../db/prisma";
 import { createTrigger, updateTrigger, deleteTrigger } from "../services/triggerService";
+import { redactTrigger } from "../services/triggerAuth";
 
 const router = Router({ mergeParams: true });
 router.use(requireAuth);
@@ -11,7 +12,7 @@ router.get("/", async (req: Request<{ id: string }>, res, next) => {
   try {
     await assertOwnership(req.params.id, req.user!.userId, req.user!.role);
     const triggers = await prisma.trigger.findMany({ where: { functionId: req.params.id } });
-    res.json(triggers);
+    res.json(triggers.map(redactTrigger));
   } catch (err: any) {
     if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });
     next(err);
@@ -37,7 +38,12 @@ router.post("/", async (req: Request<{ id: string }>, res, next) => {
 router.put("/:tid", async (req: Request<{ id: string; tid: string }>, res, next) => {
   try {
     await assertOwnership(req.params.id, req.user!.userId, req.user!.role);
-    const trigger = await updateTrigger(req.params.tid, req.body);
+    const { httpMethod, cronExpr, enabled } = req.body;
+    const trigger = await updateTrigger(req.params.tid, {
+      ...(httpMethod !== undefined && { httpMethod }),
+      ...(cronExpr !== undefined && { cronExpr }),
+      ...(enabled !== undefined && { enabled }),
+    });
     res.json(trigger);
   } catch (err: any) {
     if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });

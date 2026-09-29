@@ -27,6 +27,7 @@ export async function setupDb() {
       "type" TEXT NOT NULL,
       "httpMethod" TEXT DEFAULT 'ANY',
       "cronExpr" TEXT,
+      "secretTokenHash" TEXT,
       "enabled" BOOLEAN NOT NULL DEFAULT true,
       "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
       "updatedAt" TIMESTAMP(3) NOT NULL,
@@ -34,6 +35,8 @@ export async function setupDb() {
     )
   `;
 
+  // CREATE TABLE IF NOT EXISTS leaves older setup-db tables unchanged.
+  await prisma.$executeRaw`ALTER TABLE "sv_triggers" ADD COLUMN IF NOT EXISTS "secretTokenHash" TEXT`;
   await prisma.$executeRaw`
     CREATE TABLE IF NOT EXISTS "sv_execution_logs" (
       "id" TEXT NOT NULL,
