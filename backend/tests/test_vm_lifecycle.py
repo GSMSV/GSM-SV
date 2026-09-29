@@ -943,6 +943,96 @@ class TestVMCreationQueue:
         assert len(notifications) == 1
         assert detail in notifications[0].message
 
+    def test_success_notification_is_committed_with_terminal_status(self, db, user, server):
+        queued = enqueue_vm_creation(
+            db, user, VMCreate(tier=VMTier.BASIC, purpose="테스트용", node_name=server.name),
+        )
+        terminal_commits = []
+
+        def observe_flush(session, _context, _instances):
+            if any(isinstance(obj, VmCreationJob) and obj.status == "completed" for obj in session.dirty):
+                session.info["terminal_flushed"] = True
+            if any(isinstance(obj, Notification) for obj in session.new):
+                session.info["notification_flushed"] = True
+
+        def observe_commit(session):
+            if session.info.get("terminal_flushed"):
+                terminal_commits.append(bool(session.info.get("notification_flushed")))
+
+        event.listen(TestSession, "before_flush", observe_flush)
+        event.listen(TestSession, "before_commit", observe_commit)
+        try:
+            with patch("services.vm_creation_queue.SessionLocal", new=TestSession), patch(
+                "services.vm_creation_queue.create_vm",
+                return_value={"vmid": 301, "name": "safe-vm", "assigned_node": server.name},
+            ):
+                process_vm_creation_job(queued.job_id)
+        finally:
+            event.remove(TestSession, "before_commit", observe_commit)
+            event.remove(TestSession, "before_flush", observe_flush)
+        assert terminal_commits == [True]
+        db.expire_all()
+        assert db.get(VmCreationJob, queued.job_id).status == "completed"
+        assert db.query(Notification).filter(Notification.user_id == user.id).count() == 1
+
+    def test_failure_notification_is_committed_with_terminal_status(self, db, user, server):
+        queued = enqueue_vm_creation(
+            db, user, VMCreate(tier=VMTier.BASIC, purpose="테스트용", node_name=server.name),
+        )
+        terminal_commits = []
+
+        def observe_flush(session, _context, _instances):
+            if any(isinstance(obj, VmCreationJob) and obj.status == "failed" for obj in session.dirty):
+                session.info["terminal_flushed"] = True
+            if any(isinstance(obj, Notification) for obj in session.new):
+                session.info["notification_flushed"] = True
+
+        def observe_commit(session):
+            if session.info.get("terminal_flushed"):
+                terminal_commits.append(bool(session.info.get("notification_flushed")))
+
+        event.listen(TestSession, "before_flush", observe_flush)
+        event.listen(TestSession, "before_commit", observe_commit)
+        try:
+            with patch("services.vm_creation_queue.SessionLocal", new=TestSession), patch(
+                "services.vm_creation_queue.create_vm", side_effect=RuntimeError("SQL SECRET"),
+            ):
+                process_vm_creation_job(queued.job_id)
+        finally:
+            event.remove(TestSession, "before_commit", observe_commit)
+            event.remove(TestSession, "before_flush", observe_flush)
+        assert terminal_commits == [True]
+        db.expire_all()
+        assert db.get(VmCreationJob, queued.job_id).status == "failed"
+        assert db.query(Notification).filter(Notification.user_id == user.id).count() == 1
+
+    def test_post_commit_error_never_changes_completed_job_to_failed(self, db, user, server):
+        queued = enqueue_vm_creation(
+            db, user, VMCreate(tier=VMTier.BASIC, purpose="테스트용", node_name=server.name),
+        )
+        def fail_after_terminal_commit(session):
+            if session.info.get("terminal_commit") and not session.in_nested_transaction():
+                raise RuntimeError("post-commit refresh failed")
+
+        # after_commit is deliberately outside the DB transaction; no later error may invert success.
+        def mark_terminal_commit(session, _context, _instances):
+            if any(isinstance(obj, VmCreationJob) and obj.status == "completed" for obj in session.dirty):
+                session.info["terminal_commit"] = True
+
+        event.listen(TestSession, "before_flush", mark_terminal_commit)
+        event.listen(TestSession, "after_commit", fail_after_terminal_commit)
+        try:
+            with patch("services.vm_creation_queue.SessionLocal", new=TestSession), patch(
+                "services.vm_creation_queue.create_vm",
+                return_value={"vmid": 301, "name": "safe-vm", "assigned_node": server.name},
+            ):
+                process_vm_creation_job(queued.job_id)
+        finally:
+            event.remove(TestSession, "after_commit", fail_after_terminal_commit)
+            event.remove(TestSession, "before_flush", mark_terminal_commit)
+        db.expire_all()
+        assert db.get(VmCreationJob, queued.job_id).status == "completed"
+
     def test_notification_commit_failure_preserves_completed_job(self, db, user, server):
         queued = enqueue_vm_creation(
             db, user, VMCreate(tier=VMTier.BASIC, purpose="테스트용", node_name=server.name),
