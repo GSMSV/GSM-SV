@@ -49,6 +49,14 @@ test("one of multiple protected triggers can authorize without bypass", () => {
   assert.equal(authorizeHttpTrigger([{ httpMethod: "ANY", secretTokenHash: other.secretTokenHash }, { httpMethod: "ANY", secretTokenHash }], "POST", token), "authorized");
 });
 
+test("legacy public ANY remains callable on other methods beside protected POST", () => {
+  const { secretTokenHash } = createHttpTriggerToken();
+  const triggers = [{ httpMethod: "ANY", secretTokenHash: null }, { httpMethod: "POST", secretTokenHash }];
+  assert.equal(authorizeHttpTrigger(triggers, "POST", undefined), "unauthorized");
+  assert.equal(authorizeHttpTrigger(triggers, "GET", undefined), "authorized");
+  assert.equal(authorizeHttpTrigger(triggers, "PUT", undefined), "authorized");
+});
+
 test("trigger JSON never contains a persisted digest", () => {
   assert.deepEqual(redactTrigger({ id: "t1", enabled: true, secretTokenHash: "digest" }), { id: "t1", enabled: true });
 });

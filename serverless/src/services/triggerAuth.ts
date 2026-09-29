@@ -18,6 +18,8 @@ type HttpTrigger = { httpMethod: string | null; secretTokenHash: string | null }
 
 // An exact method beats ANY. Within that method, a protected trigger takes
 // precedence over a legacy public trigger so a public row cannot bypass it.
+// A legacy public ANY still permits other methods when only POST is protected;
+// disabling/replacing that legacy row is required to protect the entire URL.
 export function authorizeHttpTrigger(
   triggers: HttpTrigger[], method: string, token: string | undefined
 ): "authorized" | "unauthorized" | "method-not-allowed" {
