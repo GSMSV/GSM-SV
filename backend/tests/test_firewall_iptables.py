@@ -16,7 +16,7 @@ from models.vm import Vm
 from models.vm_port import VmPort
 from schemas.fw_schema import VmPortCreate
 from api.routes.firewall import add_custom_port, restore_default_ports
-from services.network_service import allocate_random_port, manage_custom_iptables
+from services.network_service import allocate_random_port, manage_custom_iptables, manage_iptables
 
 
 # ── allocate_random_port ──────────────────────────────────────────────────────
@@ -86,8 +86,118 @@ class TestManageCustomIptables:
     """manage_custom_iptables() — paramiko SSH mock으로 명령어 검증"""
 
     @patch("services.network_service.paramiko.SSHClient")
+    def test_preexisting_shared_forward_survives_dnat_error(self, mock_ssh_cls):
+        ssh = MagicMock()
+        rules = set()
+        seen = []
+
+        def exec_rule(command):
+            seen.append(command)
+            if "-D FORWARD" in command:
+                pytest.fail("Rollback deleted another port's shared FORWARD rule")
+            if "-D PREROUTING" in command:
+                rules.discard("DNAT")
+                return _make_command_result(0)
+            if "-C FORWARD" in command and "-A" not in command:
+                return _make_command_result(0)  # Another port owns this FORWARD rule.
+            if "-C PREROUTING" in command and "-A" not in command:
+                return _make_command_result(1)
+            if "-A PREROUTING" in command:
+                rules.add("DNAT")
+                raise OSError("DNAT applied remotely, reply lost")
+
+            if "-A FORWARD" in command:
+                pytest.fail("Existing shared FORWARD was added again")
+            return _make_command_result(0)
+
+        ssh.exec_command.side_effect = exec_rule
+        mock_ssh_cls.return_value = ssh
+        result = manage_custom_iptables(
+            server=_make_server(), vm_ip="10.0.0.5", internal_port=443,
+            external_port=31234, protocol="tcp", action="ADD",
+        )
+        assert result is False
+        assert "DNAT" not in rules
+        assert any("-C FORWARD" in cmd for cmd in seen)
+        assert not any("-D FORWARD" in cmd for cmd in seen)
+
+    @patch("services.network_service.paramiko.SSHClient")
+    def test_preexisting_rules_are_left_untouched(self, mock_ssh_cls):
+        ssh = MagicMock()
+        commands = []
+
+        def exec_rule(command):
+            commands.append(command)
+            if "-C PREROUTING" in command and "-A" not in command:
+                return _make_command_result(0)  # Preexisting DNAT.
+            if "-C FORWARD" in command and "-A" not in command:
+                return _make_command_result(0)  # Shared FORWARD.
+            if "-A PREROUTING" in command:
+                pytest.fail("Preexisting DNAT was added again")
+            if "-D " in command:
+                pytest.fail("Rollback removed a preexisting rule")
+            return _make_command_result(0)
+
+        ssh.exec_command.side_effect = exec_rule
+        mock_ssh_cls.return_value = ssh
+        result = manage_custom_iptables(
+            server=_make_server(), vm_ip="10.0.0.5", internal_port=443,
+            external_port=31234, protocol="tcp", action="ADD",
+        )
+        assert result is True  # Already installed: no ADD necessary.
+        assert not any("-A " in cmd for cmd in commands)
+
+    @patch("services.network_service.paramiko.SSHClient")
+    def test_default_port_failure_keeps_shared_ssh_forward(self, mock_ssh_cls):
+        ssh = MagicMock()
+        commands = []
+
+        def exec_rule(command):
+            commands.append(command)
+            if "-C FORWARD" in command and "--dport 22" in command:
+                return _make_command_result(0)  # Existing rule shared by another port.
+            if "-C " in command and "-D " not in command:
+                return _make_command_result(1)
+            if "-A PREROUTING" in command and "--dport 22001" in command:
+                raise OSError("SSH response lost after applying default SSH DNAT")
+            if "-D FORWARD" in command and "--dport 22" in command:
+                pytest.fail("Default-port rollback deleted shared SSH FORWARD")
+            return _make_command_result(0)
+
+        ssh.exec_command.side_effect = exec_rule
+        mock_ssh_cls.return_value = ssh
+        server = _make_server()
+        server.base_port = 22000
+        assert manage_iptables(server, 1, "10.0.0.5", "ADD") is False
+        assert any("-D PREROUTING" in cmd and "--dport 22001" in cmd for cmd in commands)
+        assert not any("-D FORWARD" in cmd and "--dport 22" in cmd for cmd in commands)
+
+    @patch("services.network_service.paramiko.SSHClient")
+    def test_ambiguous_first_command_failure_compensates_only_new_rule(self, mock_ssh_cls):
+        ssh = MagicMock()
+        commands = []
+
+        def exec_rule(command):
+            commands.append(command)
+            if "-C PREROUTING" in command and "-A" not in command:
+                return _make_command_result(1)
+            if "-A PREROUTING" in command:
+                raise OSError("applied remotely, reply lost")
+            return _make_command_result(0)
+
+        ssh.exec_command.side_effect = exec_rule
+        mock_ssh_cls.return_value = ssh
+        assert manage_custom_iptables(
+            server=_make_server(), vm_ip="10.0.0.5", internal_port=443,
+            external_port=31234, protocol="tcp", action="ADD",
+        ) is False
+        assert any("-D PREROUTING" in cmd for cmd in commands)
+        assert not any("-D FORWARD" in cmd for cmd in commands)
+
+    @patch("services.network_service.paramiko.SSHClient")
     def test_add_runs_correct_commands(self, mock_ssh_cls):
         ssh = _make_ssh_mock()
+        ssh.exec_command.side_effect = lambda cmd: _make_command_result(1 if "-C " in cmd else 0)
         mock_ssh_cls.return_value = ssh
         server = _make_server()
 
@@ -181,13 +291,12 @@ class TestManageCustomIptables:
             )
 
     @patch("services.network_service.paramiko.SSHClient")
-    def test_add_failure_runs_remaining_commands_and_rollback(self, mock_ssh_cls):
+    def test_add_failure_stops_before_remaining_command_and_rolls_back(self, mock_ssh_cls):
         ssh = MagicMock()
         ssh.exec_command.side_effect = [
+            _make_command_result(1),  # DNAT absent
+            _make_command_result(1),  # FORWARD absent
             _make_command_result(1, "DNAT failed"),
-            _make_command_result(0),
-            _make_command_result(0),
-            _make_command_result(0),
             _make_command_result(0),
         ]
         mock_ssh_cls.return_value = ssh
@@ -204,9 +313,35 @@ class TestManageCustomIptables:
 
         assert result is False
         executed_cmds = [c.args[0] for c in ssh.exec_command.call_args_list]
-        assert any("FORWARD" in c and "-A" in c for c in executed_cmds)
+        assert not any("FORWARD" in c and "-A" in c for c in executed_cmds)
         assert any("PREROUTING" in c and "-D" in c for c in executed_cmds)
-        assert any("FORWARD" in c and "-D" in c for c in executed_cmds)
+        assert not any("FORWARD" in c and "-D" in c for c in executed_cmds)
+
+    @patch("services.network_service.paramiko.SSHClient")
+    def test_add_ssh_error_after_dnat_rolls_back_before_returning_failure(self, mock_ssh_cls):
+        ssh = MagicMock()
+        ssh.exec_command.side_effect = [
+            _make_command_result(1),  # PREROUTING absent
+            _make_command_result(1),  # FORWARD absent
+            _make_command_result(0),  # PREROUTING added
+            OSError("FORWARD SSH channel closed"),
+            _make_command_result(0),  # rollback FORWARD (may have applied remotely)
+            _make_command_result(0),  # rollback PREROUTING
+        ]
+        mock_ssh_cls.return_value = ssh
+
+        result = manage_custom_iptables(
+            server=_make_server(), vm_ip="10.0.0.5", internal_port=443,
+            external_port=31234, protocol="tcp", action="ADD",
+        )
+
+        assert result is False
+        commands = [call.args[0] for call in ssh.exec_command.call_args_list]
+        assert len(commands) == 6
+        assert "-D FORWARD" in commands[4]
+        assert "-D PREROUTING" in commands[5]
+        assert "while" not in commands[4] + commands[5]
+        ssh.close.assert_called_once()
 
 
 class TestAddCustomPortRollback:
