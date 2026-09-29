@@ -3,6 +3,8 @@
 Proxmox 호출은 mock 처리, DB는 SQLite 인메모리 사용
 """
 import pytest
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event
 from unittest.mock import MagicMock, patch
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -45,6 +47,10 @@ def get_test_app():
 
 @pytest.fixture(autouse=True)
 def setup_db():
+    from api.routes import monitoring
+
+    if hasattr(monitoring, "_node_stats_cache"):
+        monitoring._node_stats_cache.clear()
     Base.metadata.create_all(bind=engine)
     yield
     Base.metadata.drop_all(bind=engine)
@@ -170,3 +176,67 @@ class TestMonitoringRBAC:
         assert res.status_code == 200
         data = res.json()
         assert data.get("stats") == {}
+
+
+class TestMonitoringCache:
+    def test_repeated_requests_refresh_only_after_ttl(self, db, server1, admin_user):
+        app, mock_px = make_client_with_user(admin_user)
+        clock = [100.0]
+        with patch("api.routes.monitoring.get_proxmox_for_server", return_value=mock_px), \
+             patch("time.monotonic", side_effect=lambda: clock[0]):
+            with TestClient(app) as client:
+                first = client.get("/api/v1/monitoring/nodes")
+                clock[0] = 129.0
+                second = client.get("/api/v1/monitoring/nodes")
+                clock[0] = 131.0
+                third = client.get("/api/v1/monitoring/nodes")
+        assert first.status_code == second.status_code == third.status_code == 200
+        assert first.json() == second.json() == third.json()
+        assert mock_px.nodes.return_value.status.get.call_count == 2
+
+    def test_cache_is_per_node_not_per_user_response(self, db, server1, server2, admin_user, regular_user):
+        db.add(Vm(hypervisor_vmid=100, name="vm-test", server_id=server1.id, owner_id=regular_user.id))
+        db.commit()
+        app, mock_px = make_client_with_user(admin_user)
+        with patch("api.routes.monitoring.get_proxmox_for_server", return_value=mock_px):
+            with TestClient(app) as client:
+                admin_stats = client.get("/api/v1/monitoring/nodes").json()["stats"]
+                app.dependency_overrides[get_current_user] = lambda: regular_user
+                user_stats = client.get("/api/v1/monitoring/nodes").json()["stats"]
+        assert set(admin_stats) == {"node1", "node2"}
+        assert set(user_stats) == {"node1"}
+        assert mock_px.nodes.return_value.status.get.call_count == 2
+
+    def test_offline_result_is_cached_until_expiry(self, db, server1, admin_user):
+        app, mock_px = make_client_with_user(admin_user)
+        mock_px.nodes.return_value.status.get.side_effect = TimeoutError("unreachable")
+        with patch("api.routes.monitoring.get_proxmox_for_server", return_value=mock_px):
+            with TestClient(app) as client:
+                first = client.get("/api/v1/monitoring/nodes").json()["stats"]["node1"]
+                second = client.get("/api/v1/monitoring/nodes").json()["stats"]["node1"]
+        assert first == second == {"status": "offline", "cpu_usage_percent": None,
+                                    "ram_total_gb": None, "ram_used_gb": None,
+                                    "ram_free_gb": None, "uptime_seconds": None,
+                                    "error": "노드에 연결할 수 없습니다."}
+        assert mock_px.nodes.return_value.status.get.call_count == 1
+
+    def test_concurrent_requests_share_a_single_node_fetch(self, db, server1, admin_user):
+        app, mock_px = make_client_with_user(admin_user)
+        started, release = Event(), Event()
+
+        def delayed_status():
+            started.set()
+            assert release.wait(5)
+            return MOCK_NODE_STATUS
+
+        mock_px.nodes.return_value.status.get.side_effect = delayed_status
+        with patch("api.routes.monitoring.get_proxmox_for_server", return_value=mock_px):
+            with TestClient(app) as client, ThreadPoolExecutor(max_workers=2) as pool:
+                first = pool.submit(client.get, "/api/v1/monitoring/nodes")
+                assert started.wait(5)
+                second = pool.submit(client.get, "/api/v1/monitoring/nodes")
+                release.set()
+                first_response, second_response = first.result(), second.result()
+        assert first_response.status_code == second_response.status_code == 200
+        assert first_response.json() == second_response.json()
+        assert mock_px.nodes.return_value.status.get.call_count == 1
