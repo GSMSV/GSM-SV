@@ -559,13 +559,8 @@ def create_vm(
         #     (SSH 호스트 키 재생성 등). config를 그대로 두면 instance-id가 고정되어
         #     cloud-init이 진짜로 최초 1회만 실행된다.
 
-        # 11. 성공 알림 저장 + 생성 완료 표시 (이제부터 시작/재시작 가능)
+        # 11. 생성 완료 표시 (알림은 작업 상태가 커밋된 뒤 큐 워커에서 저장)
         new_vm.ready = True
-        db.add(Notification(
-            user_id=current_user.id,
-            type="success",
-            message=f"VM '{vm_name}'이(가) 노드 '{server.name}'에 생성되었습니다.",
-        ))
         db.commit()
 
         return {

@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from core.config import settings
 from core.database import SessionLocal
 from core.timezone import now_kst
+from models.notification import Notification
 from models.server import Server
 from models.user import User, UserRole
 from models.vm import Vm
@@ -183,6 +184,17 @@ def get_vm_creation_job(db: Session, job_id: str, current_user: User) -> VMCreat
     return _serialize_job(job, position=_get_queue_position(db, job))
 
 
+def _notify_job_result(db: Session, job: VmCreationJob, kind: str, message: str) -> None:
+    """완료 상태 커밋 이후 알림을 별도 트랜잭션으로 저장한다."""
+    job_id, user_id = job.id, job.user_id
+    try:
+        db.add(Notification(user_id=user_id, type=kind, message=message))
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("[vm-queue] 작업 %s 알림 저장 실패", job_id)
+
+
 def process_vm_creation_job(job_id: str) -> None:
     """큐에서 가져온 단일 작업을 처리한다."""
     job_db = SessionLocal()
@@ -220,6 +232,10 @@ def process_vm_creation_job(job_id: str) -> None:
             job.status = VMCreationJobStatus.COMPLETED.value
             job.finished_at = now_kst()
             job_db.commit()
+            _notify_job_result(
+                job_db, job, "success",
+                f"VM '{job.requested_name or job.vmid}'이(가) 노드 '{job.node_name}'에 생성되었습니다 (VMID {job.vmid}).",
+            )
             return
 
         payload = job.payload
@@ -248,6 +264,16 @@ def process_vm_creation_job(job_id: str) -> None:
         job.result = result
         job.error_message = None
         job_db.commit()
+        connection_info = ""
+        if result.get("internal_ip"):
+            connection_info += f" 접속 IP: {result['internal_ip']}."
+        if result.get("ssh_user"):
+            connection_info += f" SSH 사용자: {result['ssh_user']}."
+        _notify_job_result(
+            job_db, job, "success",
+            f"VM '{result.get('name') or job.requested_name or job.vmid}'이(가) "
+            f"노드 '{job.node_name}'에 생성되었습니다 (VMID {job.vmid}).{connection_info}",
+        )
         logger.info("[vm-queue] 작업 완료: %s -> VMID %s", job_id, job.vmid)
     except Exception as exc:
         logger.exception("[vm-queue] 작업 실패: %s", job_id)
@@ -262,6 +288,9 @@ def process_vm_creation_job(job_id: str) -> None:
                 )
                 job.message = "VM 생성에 실패했습니다."
                 job_db.commit()
+                _notify_job_result(
+                    job_db, job, "error", f"VM 생성 실패 — {job.error_message}",
+                )
         except Exception:
             job_db.rollback()
             logger.exception("[vm-queue] 실패 상태 기록 중 오류: %s", job_id)
