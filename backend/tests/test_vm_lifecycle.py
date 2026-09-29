@@ -956,7 +956,7 @@ class TestVMCreationQueue:
                 session.info["notification_flushed"] = True
 
         def observe_commit(session):
-            if session.info.get("terminal_flushed"):
+            if session.info.get("terminal_flushed") and not session.in_nested_transaction():
                 terminal_commits.append(bool(session.info.get("notification_flushed")))
 
         event.listen(TestSession, "before_flush", observe_flush)
@@ -988,7 +988,7 @@ class TestVMCreationQueue:
                 session.info["notification_flushed"] = True
 
         def observe_commit(session):
-            if session.info.get("terminal_flushed"):
+            if session.info.get("terminal_flushed") and not session.in_nested_transaction():
                 terminal_commits.append(bool(session.info.get("notification_flushed")))
 
         event.listen(TestSession, "before_flush", observe_flush)
@@ -1038,11 +1038,11 @@ class TestVMCreationQueue:
             db, user, VMCreate(tier=VMTier.BASIC, purpose="테스트용", node_name=server.name),
         )
 
-        def reject_notification(session):
+        def reject_notification(session, _context, _instances):
             if any(isinstance(obj, Notification) for obj in session.new):
                 raise RuntimeError("notification insert failed")
 
-        event.listen(TestSession, "before_commit", reject_notification)
+        event.listen(TestSession, "before_flush", reject_notification)
         try:
             with patch("services.vm_creation_queue.SessionLocal", new=TestSession), patch(
                 "services.vm_creation_queue.create_vm",
@@ -1050,7 +1050,7 @@ class TestVMCreationQueue:
             ):
                 process_vm_creation_job(queued.job_id)
         finally:
-            event.remove(TestSession, "before_commit", reject_notification)
+            event.remove(TestSession, "before_flush", reject_notification)
 
         db.expire_all()
         job = db.get(VmCreationJob, queued.job_id)
@@ -1063,18 +1063,18 @@ class TestVMCreationQueue:
             db, user, VMCreate(tier=VMTier.BASIC, purpose="테스트용", node_name=server.name),
         )
 
-        def reject_notification(session):
+        def reject_notification(session, _context, _instances):
             if any(isinstance(obj, Notification) for obj in session.new):
                 raise RuntimeError("notification insert failed")
 
-        event.listen(TestSession, "before_commit", reject_notification)
+        event.listen(TestSession, "before_flush", reject_notification)
         try:
             with patch("services.vm_creation_queue.SessionLocal", new=TestSession), patch(
                 "services.vm_creation_queue.create_vm", side_effect=RuntimeError("SQL SECRET"),
             ):
                 process_vm_creation_job(queued.job_id)
         finally:
-            event.remove(TestSession, "before_commit", reject_notification)
+            event.remove(TestSession, "before_flush", reject_notification)
 
         db.expire_all()
         job = db.get(VmCreationJob, queued.job_id)
