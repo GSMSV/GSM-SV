@@ -14,4 +14,4 @@ COPY . .
 RUN npm run build
 
 EXPOSE 3001
-CMD ["sh", "-c", "export DATABASE_URL=\"$(echo \"$DATABASE_URL\" | sed 's/#/%23/g')\" && npm start"]
+CMD ["sh", "-c", "export DATABASE_URL=\"$(echo \"$DATABASE_URL\" | sed 's/#/%23/g')\" && npx prisma migrate deploy && exec npm start"]
