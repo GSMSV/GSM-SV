@@ -6,7 +6,7 @@ Proxmox/SSH/iptables는 mock으로 대체, DB는 SQLite 인메모리 사용.
 import threading
 import pytest
 from unittest.mock import patch, MagicMock
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 
 from core.timezone import now_kst
@@ -467,12 +467,12 @@ class TestVMCreationHappyPath:
         assert vm.internal_ip == "10.0.0.100"
         assert vm.ready is True
 
-        # 알림 생성 확인
+        # 직접 생성 도중에는 작업 상태가 아직 완료로 커밋되지 않았으므로 알리지 않는다.
         notif = db.query(Notification).filter(
             Notification.user_id == user.id,
             Notification.type == "success",
         ).first()
-        assert notif is not None
+        assert notif is None
 
 
 # ── VM-TC-14: 정상 VM 삭제 흐름 ──────────────────────────────
@@ -885,6 +885,15 @@ class TestVMCreationQueue:
         assert job.vmid == 301
         assert job.result["vmid"] == 301
         assert job.message is not None
+        notifications = db.query(Notification).filter(Notification.user_id == user.id).all()
+        assert len(notifications) == 1
+        assert notifications[0].type == "success"
+        assert "queued-vm" in notifications[0].message
+        assert "test-node" in notifications[0].message
+        assert "301" in notifications[0].message
+        assert "10.0.0.150" in notifications[0].message
+        assert "ubuntu" in notifications[0].message
+        assert "secret" not in notifications[0].message
 
     @patch("services.vm_creation_queue.create_vm")
     @patch("services.vm_creation_queue.SessionLocal", new=TestSession)
@@ -907,6 +916,11 @@ class TestVMCreationQueue:
         assert job.status == "failed"
         assert job.error_message == "VM 생성에 실패했습니다. 잠시 후 다시 시도해주세요."
         assert "vm_ports" not in job.error_message
+        notifications = db.query(Notification).filter(Notification.user_id == user.id).all()
+        assert len(notifications) == 1
+        assert notifications[0].type == "error"
+        assert job.error_message in notifications[0].message
+        assert "vm_ports" not in notifications[0].message
 
     @patch("services.vm_creation_queue.create_vm")
     @patch("services.vm_creation_queue.SessionLocal", new=TestSession)
@@ -925,6 +939,161 @@ class TestVMCreationQueue:
         db.refresh(job)
         assert job.status == "failed"
         assert job.error_message == detail
+        notifications = db.query(Notification).filter(Notification.user_id == user.id).all()
+        assert len(notifications) == 1
+        assert detail in notifications[0].message
+
+    def test_success_notification_is_committed_with_terminal_status(self, db, user, server):
+        queued = enqueue_vm_creation(
+            db, user, VMCreate(tier=VMTier.BASIC, purpose="테스트용", node_name=server.name),
+        )
+        terminal_commits = []
+
+        def observe_flush(session, _context, _instances):
+            if any(isinstance(obj, VmCreationJob) and obj.status == "completed" for obj in session.dirty):
+                session.info["terminal_flushed"] = True
+            if any(isinstance(obj, Notification) for obj in session.new):
+                session.info["notification_flushed"] = True
+
+        def observe_commit(session):
+            if session.info.get("terminal_flushed") and not session.in_nested_transaction():
+                terminal_commits.append(bool(session.info.get("notification_flushed")))
+
+        event.listen(TestSession, "before_flush", observe_flush)
+        event.listen(TestSession, "before_commit", observe_commit)
+        try:
+            with patch("services.vm_creation_queue.SessionLocal", new=TestSession), patch(
+                "services.vm_creation_queue.create_vm",
+                return_value={"vmid": 301, "name": "safe-vm", "assigned_node": server.name},
+            ):
+                process_vm_creation_job(queued.job_id)
+        finally:
+            event.remove(TestSession, "before_commit", observe_commit)
+            event.remove(TestSession, "before_flush", observe_flush)
+        assert terminal_commits == [True]
+        db.expire_all()
+        assert db.get(VmCreationJob, queued.job_id).status == "completed"
+        assert db.query(Notification).filter(Notification.user_id == user.id).count() == 1
+
+    def test_failure_notification_is_committed_with_terminal_status(self, db, user, server):
+        queued = enqueue_vm_creation(
+            db, user, VMCreate(tier=VMTier.BASIC, purpose="테스트용", node_name=server.name),
+        )
+        terminal_commits = []
+
+        def observe_flush(session, _context, _instances):
+            if any(isinstance(obj, VmCreationJob) and obj.status == "failed" for obj in session.dirty):
+                session.info["terminal_flushed"] = True
+            if any(isinstance(obj, Notification) for obj in session.new):
+                session.info["notification_flushed"] = True
+
+        def observe_commit(session):
+            if session.info.get("terminal_flushed") and not session.in_nested_transaction():
+                terminal_commits.append(bool(session.info.get("notification_flushed")))
+
+        event.listen(TestSession, "before_flush", observe_flush)
+        event.listen(TestSession, "before_commit", observe_commit)
+        try:
+            with patch("services.vm_creation_queue.SessionLocal", new=TestSession), patch(
+                "services.vm_creation_queue.create_vm", side_effect=RuntimeError("SQL SECRET"),
+            ):
+                process_vm_creation_job(queued.job_id)
+        finally:
+            event.remove(TestSession, "before_commit", observe_commit)
+            event.remove(TestSession, "before_flush", observe_flush)
+        assert terminal_commits == [True]
+        db.expire_all()
+        assert db.get(VmCreationJob, queued.job_id).status == "failed"
+        assert db.query(Notification).filter(Notification.user_id == user.id).count() == 1
+
+    def test_post_commit_error_never_changes_completed_job_to_failed(self, db, user, server):
+        queued = enqueue_vm_creation(
+            db, user, VMCreate(tier=VMTier.BASIC, purpose="테스트용", node_name=server.name),
+        )
+        def fail_after_terminal_commit(session):
+            if session.info.get("terminal_commit") and not session.in_nested_transaction():
+                raise RuntimeError("post-commit refresh failed")
+
+        # after_commit is deliberately outside the DB transaction; no later error may invert success.
+        def mark_terminal_commit(session, _context, _instances):
+            if any(isinstance(obj, VmCreationJob) and obj.status == "completed" for obj in session.dirty):
+                session.info["terminal_commit"] = True
+
+        event.listen(TestSession, "before_flush", mark_terminal_commit)
+        event.listen(TestSession, "after_commit", fail_after_terminal_commit)
+        try:
+            with patch("services.vm_creation_queue.SessionLocal", new=TestSession), patch(
+                "services.vm_creation_queue.create_vm",
+                return_value={"vmid": 301, "name": "safe-vm", "assigned_node": server.name},
+            ):
+                process_vm_creation_job(queued.job_id)
+        finally:
+            event.remove(TestSession, "after_commit", fail_after_terminal_commit)
+            event.remove(TestSession, "before_flush", mark_terminal_commit)
+        db.expire_all()
+        assert db.get(VmCreationJob, queued.job_id).status == "completed"
+
+    def test_notification_commit_failure_preserves_completed_job(self, db, user, server):
+        queued = enqueue_vm_creation(
+            db, user, VMCreate(tier=VMTier.BASIC, purpose="테스트용", node_name=server.name),
+        )
+
+        def reject_notification(session, _context, _instances):
+            if any(isinstance(obj, Notification) for obj in session.new):
+                raise RuntimeError("notification insert failed")
+
+        event.listen(TestSession, "before_flush", reject_notification)
+        try:
+            with patch("services.vm_creation_queue.SessionLocal", new=TestSession), patch(
+                "services.vm_creation_queue.create_vm",
+                return_value={"vmid": 301, "name": "safe-vm", "assigned_node": server.name},
+            ):
+                process_vm_creation_job(queued.job_id)
+        finally:
+            event.remove(TestSession, "before_flush", reject_notification)
+
+        db.expire_all()
+        job = db.get(VmCreationJob, queued.job_id)
+        assert job.status == "completed"
+        assert job.vmid == 301
+        assert db.query(Notification).filter(Notification.user_id == user.id).count() == 0
+
+    def test_notification_commit_failure_preserves_failed_job(self, db, user, server):
+        queued = enqueue_vm_creation(
+            db, user, VMCreate(tier=VMTier.BASIC, purpose="테스트용", node_name=server.name),
+        )
+
+        def reject_notification(session, _context, _instances):
+            if any(isinstance(obj, Notification) for obj in session.new):
+                raise RuntimeError("notification insert failed")
+
+        event.listen(TestSession, "before_flush", reject_notification)
+        try:
+            with patch("services.vm_creation_queue.SessionLocal", new=TestSession), patch(
+                "services.vm_creation_queue.create_vm", side_effect=RuntimeError("SQL SECRET"),
+            ):
+                process_vm_creation_job(queued.job_id)
+        finally:
+            event.remove(TestSession, "before_flush", reject_notification)
+
+        db.expire_all()
+        job = db.get(VmCreationJob, queued.job_id)
+        assert job.status == "failed"
+        assert job.error_message == "VM 생성에 실패했습니다. 잠시 후 다시 시도해주세요."
+        assert db.query(Notification).filter(Notification.user_id == user.id).count() == 0
+
+    def test_already_completed_job_does_not_notify_again(self, db, user, server):
+        queued = enqueue_vm_creation(
+            db, user, VMCreate(tier=VMTier.BASIC, purpose="테스트용", node_name=server.name),
+        )
+        with patch("services.vm_creation_queue.SessionLocal", new=TestSession), patch(
+            "services.vm_creation_queue.create_vm",
+            return_value={"vmid": 301, "name": "safe-vm", "assigned_node": server.name},
+        ) as mock_create:
+            process_vm_creation_job(queued.job_id)
+            process_vm_creation_job(queued.job_id)
+        assert mock_create.call_count == 1
+        assert db.query(Notification).filter(Notification.user_id == user.id).count() == 1
 
     def test_job_access_is_owner_only_or_admin(self, db, user, admin_user, server):
         vm_config = VMCreate(tier=VMTier.BASIC, purpose="테스트용", node_name=server.name, name="owner-vm")
