@@ -10,6 +10,7 @@ from pathlib import Path
 from core.timezone import now_kst
 
 from fastapi import HTTPException, status
+from proxmoxer.core import ResourceException
 from sqlalchemy import event, text
 from sqlalchemy.orm import Session
 from core.config import settings
@@ -21,6 +22,8 @@ from services.proxmox_client import get_proxmox_for_server
 from services.network_service import manage_iptables, manage_custom_iptables, calculate_ports
 from models.notification import Notification
 from models.vm_port import VmPort
+from models.https_route import HttpsRoute
+from services import caddy_service
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +31,7 @@ _IP_ALLOCATION_LOCK_KEY = 0x47534D53
 _FALLBACK_LOCK_TIMEOUT_SECONDS = 10.0
 _fallback_ip_allocation_lock = threading.Lock()
 _FALLBACK_LOCK_INFO_KEY = "internal_ip_allocation_lock_held"
+_MAX_VMID_PROBES = 50
 
 # ── 헬퍼 함수 ──────────────────────────────────────────────
 
@@ -63,7 +67,7 @@ def _generate_vm_name(user: User, tier: str, custom_name: str = None) -> tuple[s
         safe_name = _sanitize_dns_name(custom_name)
         return f"{username}-{safe_name}", custom_name
     suffix = ''.join(secrets.choice(string.ascii_lowercase + string.digits) for _ in range(4))
-    short = f"{tier}-{suffix}"
+    short = f"{_sanitize_dns_name(tier)}-{suffix}"
     return f"{username}-{short}", short
 
 
@@ -77,6 +81,45 @@ def _get_next_vmid(proxmox, node_name: str) -> int:
             return 100
         max_id = max(vm.get('vmid', 100) for vm in vms)
         return max_id + 1
+
+
+def _is_vmid_free_in_proxmox(proxmox, node_name: str, vmid: int) -> bool:
+    """지정 VMID가 Proxmox에서 비어 있는지 확인합니다."""
+    try:
+        proxmox.cluster.nextid.get(vmid=vmid)
+        return True
+    except ResourceException:
+        return False  # API는 응답했고 이미 사용 중인 VMID
+    except Exception:
+        # nextid API를 쓸 수 없는 환경 — _get_next_vmid fallback과 같은 기준(노드 VM 목록)으로 확인
+        vms = proxmox.nodes(node_name).qemu.get()
+        return all(int(vm.get("vmid", -1)) != vmid for vm in vms)
+
+
+def _vmid_conflicts_in_db(db: Session, server: Server, vmid: int) -> bool:
+    """같은 노드의 VM 레코드나 공식으로 계산한 기본 외부 포트가 이미 DB에 있는지 확인합니다."""
+    if db.query(Vm.id).filter(Vm.server_id == server.id, Vm.hypervisor_vmid == vmid).first():
+        return True
+    ports = list(calculate_ports(server.base_port, vmid).values())
+    return db.query(VmPort.id).filter(VmPort.external_port.in_(ports)).first() is not None
+
+
+def _select_vmid(db: Session, proxmox, server: Server) -> int:
+    """
+    nextid부터 차례로 검사해 DB·Proxmox 모두에서 충돌하지 않는 VMID를 고릅니다.
+    base_port 변경·수동 등록 등으로 현재 포트 공식과 다른 포트 레코드가 남아 있을 수 있어,
+    기본 외부 포트가 이미 쓰이는 VMID는 건너뜁니다. (건너뛰지 않으면 nextid가 같은 값을 계속 반환해 생성이 영구 실패)
+    """
+    vmid = _get_next_vmid(proxmox, server.name)
+    for _ in range(_MAX_VMID_PROBES):
+        if not _vmid_conflicts_in_db(db, server, vmid) and _is_vmid_free_in_proxmox(proxmox, server.name, vmid):
+            return vmid
+        logger.warning(f"VMID {vmid} ({server.name}) 건너뜀 — 기본 외부 포트 또는 VMID가 이미 사용 중")
+        vmid += 1
+    raise HTTPException(
+        status_code=status.HTTP_507_INSUFFICIENT_STORAGE,
+        detail="할당 가능한 VMID/포트가 없습니다. 관리자에게 문의하세요.",
+    )
 
 
 def _release_fallback_ip_allocation_lock(session: Session) -> None:
@@ -446,7 +489,7 @@ def create_vm(
 
     # 3. Proxmox 연결 & VMID 할당 (IP 락 취득 전에 완료)
     proxmox = get_proxmox_for_server(server)
-    vmid = _get_next_vmid(proxmox, server.name)
+    vmid = _select_vmid(db, proxmox, server)
     vm_name, vm_display_name = _generate_vm_name(current_user, tier.value, custom_name=name)
     vm_password = _generate_password()
 
@@ -470,6 +513,7 @@ def create_vm(
         vm_password=vm_password,
         expires_at=expires_at,
         purpose=purpose,
+        ready=False,
     )
     db.add(new_vm)
     db.flush()  # new_vm.id 확보
@@ -563,19 +607,15 @@ def create_vm(
         # 9. VM 부팅
         proxmox.nodes(server.name).qemu(vmid).status.start.post()
 
-        # 10. cicustom 해제 + 스니펫 정리 (cloud-init은 첫 부팅에만 적용)
-        try:
-            proxmox.nodes(server.name).qemu(vmid).config.put(delete="cicustom")
-            logger.info(f"VM {vmid} cicustom 해제 완료")
-        except Exception as e:
-            logger.warning(f"VM {vmid} cicustom 해제 실패 (무시): {e}")
+        # 10. cicustom·스니펫은 삭제하지 않고 유지한다.
+        #     Proxmox의 cloud-init instance-id는 user-data+network-data 해시값이라
+        #     cicustom을 지우면 config가 바뀌어 instance-id도 바뀌고, 그 결과 다음 재부팅마다
+        #     cloud-init이 "새 인스턴스"로 인식해 최초 부팅 전용 모듈을 매번 재실행한다
+        #     (SSH 호스트 키 재생성 등). config를 그대로 두면 instance-id가 고정되어
+        #     cloud-init이 진짜로 최초 1회만 실행된다.
 
-        try:
-            _delete_snippet(server, snippet_filename)
-        except Exception:
-            logger.warning(f"스니펫 삭제 실패 (무시): {snippet_filename}")
-
-        # 11. 성공 알림 저장
+        # 11. 성공 알림 저장 + 생성 완료 표시 (이제부터 시작/재시작 가능)
+        new_vm.ready = True
         db.add(Notification(
             user_id=current_user.id,
             type="success",
@@ -691,6 +731,14 @@ def delete_vm(
             # 과거 데이터에 VmPort 기본 포트 레코드가 없을 수 있어 기존 계산식도 fallback으로 수행
             if not has_default_ports:
                 manage_iptables(server, vmid, vm_record.internal_ip, action="DELETE")
+
+        # HTTPS 라우트 정리 — Caddy에서 먼저 제거, DB row는 Vm cascade가 처리
+        https_routes = db.query(HttpsRoute).filter(HttpsRoute.vm_id == vm_record.id).all()
+        for route in https_routes:
+            if not caddy_service.delete_route(route.subdomain):
+                logger.error(
+                    f"VM {vmid} HTTPS 라우트 Caddy 삭제 실패 — {route.subdomain} (DB는 계속 정리)"
+                )
 
         # VmPort 레코드 일괄 삭제 (VM record 삭제 전 FK 제약 해소)
         db.query(VmPort).filter(VmPort.vm_id == vm_record.id).delete()

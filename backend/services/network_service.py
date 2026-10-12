@@ -82,28 +82,73 @@ def _run_iptables_commands(
     commands: list[str],
     rollback_commands: Optional[list[str]] = None,
 ) -> bool:
-    """모든 iptables 명령을 실행하고 실패 시 가능한 rollback까지 시도합니다."""
-    success = True
-    for cmd in commands:
-        logger.info(f"Executing iptables command: {cmd}")
-        _, stdout_ch, stderr_ch = ssh.exec_command(cmd)
-        exit_status = stdout_ch.channel.recv_exit_status()
-        if exit_status != 0:
-            err = stderr_ch.read().decode()
-            logger.error(f"iptables command failed (exit {exit_status}): {err}")
-            success = False
-
-    if not success and rollback_commands:
-        for cmd in rollback_commands:
+    """ADD 전 기존 규칙을 확인하고 이번 호출에서 추가한 규칙만 보상합니다."""
+    pending = []
+    if rollback_commands:
+        # First inspect every rule: a shared FORWARD rule must not become rollback-owned.
+        for command, _ in zip(commands, rollback_commands, strict=True):
+            check, add = command.split(" || ", 1)
             try:
-                logger.info(f"Rolling back iptables command: {cmd}")
-                _, stdout_ch, stderr_ch = ssh.exec_command(cmd)
-                exit_status = stdout_ch.channel.recv_exit_status()
-                if exit_status != 0:
-                    err = stderr_ch.read().decode()
-                    logger.error(f"iptables rollback failed (exit {exit_status}): {err}")
+                _, stdout_ch, stderr_ch = ssh.exec_command(check)
+                status = stdout_ch.channel.recv_exit_status()
+                if status == 0:
+                    continue
+                if status != 1:
+                    logger.error(f"iptables check failed (exit {status}): {stderr_ch.read().decode()}")
+                    return False
             except Exception as e:
-                logger.error(f"iptables rollback error: {e}")
+                logger.error(f"iptables check error: {e}")
+                return False
+            # A single guarded -D, never the DELETE action's remove-all loop.
+            delete = check.replace("-C ", "-D ", 1)
+            pending.append((check, add, delete))
+
+    success = True
+    if rollback_commands:
+        attempted = []
+        for check, add, delete in pending:
+            # Enlist before execution: SSH may raise after the remote ADD succeeded.
+            attempted.append((check, delete))
+            try:
+                logger.info(f"Executing iptables command: {add}")
+                _, stdout_ch, stderr_ch = ssh.exec_command(add)
+                status = stdout_ch.channel.recv_exit_status()
+                if status != 0:
+                    logger.error(f"iptables command failed (exit {status}): {stderr_ch.read().decode()}")
+                    success = False
+                    break
+            except Exception as e:
+                logger.error(f"iptables command error: {e}")
+                success = False
+                break
+        # Only attempted additions can be rolled back, not merely absent rules.
+        if success:
+            attempted.clear()
+    else:
+        attempted = []
+        for cmd in commands:
+            try:
+                logger.info(f"Executing iptables command: {cmd}")
+                _, stdout_ch, stderr_ch = ssh.exec_command(cmd)
+                status = stdout_ch.channel.recv_exit_status()
+                if status != 0:
+                    logger.error(f"iptables command failed (exit {status}): {stderr_ch.read().decode()}")
+                    success = False
+            except Exception as e:
+                logger.error(f"iptables command error: {e}")
+                success = False
+                break
+
+    for check, delete in reversed(attempted):
+        try:
+            rollback = f"{check} && {delete}"
+            logger.info(f"Rolling back iptables command: {rollback}")
+            _, stdout_ch, stderr_ch = ssh.exec_command(rollback)
+            status = stdout_ch.channel.recv_exit_status()
+            if status != 0 and status != 1:
+                logger.error(f"iptables rollback failed (exit {status}): {stderr_ch.read().decode()}")
+        except Exception as e:
+            logger.error(f"iptables rollback error: {e}")
     return success
 
 

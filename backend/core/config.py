@@ -78,6 +78,11 @@ class Settings(BaseSettings):
     GATEWAY_USER: str = ""
     GATEWAY_PASSWORD: str = ""
 
+    # ── Caddy HTTPS 게이트웨이 (Admin API, Phase 2) ────────────
+    CADDY_ADMIN_API_URL: str = "http://10.0.0.117:2019"
+    CADDY_HTTPS_DOMAIN_SUFFIX: str = "https.gsmsv.site"
+    MAX_HTTPS_ROUTES_PER_VM: int = 2
+
     # ── 서버 노드 설정 (NODE_{N}_{FIELD}) ────────────────────
     # ── 노드 공용 SSH 계정 (스니펫 업로드용) ──────────────────
     NODE_SSH_USER: str = ""

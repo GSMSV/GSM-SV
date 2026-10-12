@@ -1,4 +1,5 @@
 """VM 서비스 헬퍼 함수 테스트"""
+import re
 import string
 from unittest.mock import MagicMock
 from services.vm_service import _generate_password, _generate_vm_name
@@ -75,3 +76,11 @@ class TestGenerateVmName:
         user = self._mock_user()
         names = {_generate_vm_name(user, "micro")[0] for _ in range(50)}
         assert len(names) > 40
+
+    def test_auto_name_sanitizes_tier(self):
+        """티어 값에 언더스코어가 있어도 Proxmox DNS 이름 규칙을 만족해야 함"""
+        user = self._mock_user()
+        full_name, display_name = _generate_vm_name(user, "project_custom")
+        assert full_name.startswith("testuser-project-custom-")
+        assert display_name.startswith("project-custom-")
+        assert re.fullmatch(r"[a-z0-9]([a-z0-9-]*[a-z0-9])?", full_name)

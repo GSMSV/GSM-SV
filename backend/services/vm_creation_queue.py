@@ -23,6 +23,8 @@ from services.vm_service import create_vm
 logger = logging.getLogger(__name__)
 
 _QUEUE_STOP_SENTINEL = "__STOP__"
+# HTTPException이 아닌 예외(DB·Proxmox 오류 등)는 내부 정보가 담겨 있어 사용자에게는 이 문구만 노출
+_GENERIC_FAILURE_MESSAGE = "VM 생성에 실패했습니다. 잠시 후 다시 시도해주세요."
 _vm_creation_queue: "queue.Queue[str]" = queue.Queue()
 _worker_thread: Optional[threading.Thread] = None
 _worker_lock = threading.Lock()
@@ -255,7 +257,9 @@ def process_vm_creation_job(job_id: str) -> None:
             if job:
                 job.status = VMCreationJobStatus.FAILED.value
                 job.finished_at = now_kst()
-                job.error_message = getattr(exc, "detail", None) or str(exc)
+                job.error_message = (
+                    exc.detail if isinstance(exc, HTTPException) else _GENERIC_FAILURE_MESSAGE
+                )
                 job.message = "VM 생성에 실패했습니다."
                 job_db.commit()
         except Exception:

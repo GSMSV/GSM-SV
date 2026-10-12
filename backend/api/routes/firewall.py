@@ -215,6 +215,15 @@ async def restore_default_ports(
         return {"restored": 0}
 
     default_port_map = calculate_ports(server.base_port, vmid)
+    # base_port 변경 등으로 공식과 다른 포트 레코드가 있을 수 있어, 복원할 포트가 이미 쓰이면 iptables 적용 전에 중단
+    wanted_ports = [default_port_map[port_key] for _, _, _, port_key in missing]
+    taken = sorted(p for (p,) in db.query(VmPort.external_port).filter(VmPort.external_port.in_(wanted_ports)).all())
+    if taken:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"기본 포트 {', '.join(map(str, taken))}이(가) 이미 사용 중이라 복원할 수 없습니다. 관리자에게 문의해주세요.",
+        )
+
     for internal_port, protocol, description, port_key in missing:
         external_port = default_port_map[port_key]
         db.add(VmPort(
