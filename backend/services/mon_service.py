@@ -72,6 +72,8 @@ def select_clone_storage(server: Server, candidates: list[str], required_disk_gb
     try:
         proxmox = get_proxmox_for_server(server)
         storages = proxmox.nodes(server.name).storage.get()
+        if not isinstance(storages, list):
+            raise TypeError(f"예상하지 못한 스토리지 목록 응답: {type(storages).__name__}")
     except Exception:
         logger.exception(f"[clone-storage] 서버 {server.name} 스토리지 조회 실패")
         raise HTTPException(
@@ -79,7 +81,7 @@ def select_clone_storage(server: Server, candidates: list[str], required_disk_gb
             detail="VM 저장 공간 상태를 확인할 수 없습니다. 잠시 후 다시 시도해주세요.",
         )
 
-    by_name = {st.get("storage"): st for st in storages}
+    by_name = {st.get("storage"): st for st in storages if isinstance(st, dict)}
     required_bytes = required_disk_gb * 1024 ** 3
 
     selected = None

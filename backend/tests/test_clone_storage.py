@@ -20,7 +20,7 @@ from models.user import User, UserRole
 from models.vm import Vm
 from schemas.vm_schema import VMTier
 from services.mon_service import select_clone_storage
-from services.vm_service import create_vm
+from services.vm_service import _wait_for_clone, create_vm
 
 GIB = 1024 ** 3
 
@@ -197,6 +197,27 @@ class TestSelectCloneStorage:
         assert "node3Ssd2" not in exc_info.value.detail
 
     @patch("services.mon_service.get_proxmox_for_server")
+    def test_missing_avail_uses_total_minus_used(self, mock_proxmox_fn):
+        no_avail = _storage("no-avail", total_gib=1000, used_gib=100)  # 900GiB 남음
+        del no_avail["avail"]
+        mock_proxmox_fn.return_value = _storage_proxmox([
+            no_avail,
+            _storage("with-avail", total_gib=1000, used_gib=500),     # 500GiB 남음
+        ])
+
+        assert select_clone_storage(SERVER, ["with-avail", "no-avail"], 20) == "no-avail"
+
+    @pytest.mark.parametrize("response", [None, {"data": []}, "error"])
+    @patch("services.mon_service.get_proxmox_for_server")
+    def test_non_list_response_raises_503(self, mock_proxmox_fn, response):
+        mock_proxmox_fn.return_value = _storage_proxmox(response)
+
+        with pytest.raises(HTTPException) as exc_info:
+            select_clone_storage(SERVER, ["local-lvm"], 20)
+
+        assert exc_info.value.status_code == 503
+
+    @patch("services.mon_service.get_proxmox_for_server")
     def test_storage_lookup_failure_raises_503(self, mock_proxmox_fn):
         proxmox = MagicMock()
         proxmox.nodes.return_value.storage.get.side_effect = Exception("connection refused")
@@ -356,6 +377,29 @@ class TestCloneFailureCleanup:
         proxmox.nodes.return_value.qemu.return_value.delete.assert_not_called()
         mock_sleep.assert_not_called()
 
+    @pytest.mark.parametrize("check_error", [
+        ResourceException(503, "Service Unavailable", ""),
+        ResourceException(401, "Unauthorized", "authentication failure"),
+        ConnectionError("connection reset"),
+    ])
+    def test_unconfirmed_existence_still_deletes(
+        self, mock_alloc, mock_proxmox_fn, mock_iptables, mock_upload, mock_del_snippet, mock_sleep,
+        db, user, server, check_error,
+    ):
+        """'VM 없음'이 확인되지 않은 오류(권한·일시 오류·연결 오류)면 삭제를 시도한다"""
+        proxmox = _make_mock_proxmox(200)
+        proxmox.nodes.return_value.qemu.return_value.status.current.get.side_effect = check_error
+        mock_proxmox_fn.return_value = proxmox
+        clone_failed = HTTPException(status_code=500, detail="VM 200 클론에 실패했습니다.")
+
+        with (
+            patch("services.vm_service._wait_for_clone", side_effect=clone_failed),
+            pytest.raises(HTTPException),
+        ):
+            create_vm(db, user, VMTier.BASIC, node_name="test-node")
+
+        proxmox.nodes.return_value.qemu.return_value.delete.assert_called_once_with(purge=1)
+
     def test_clone_post_failure_does_not_delete(
         self, mock_alloc, mock_proxmox_fn, mock_iptables, mock_upload, mock_del_snippet, mock_sleep, db, user, server
     ):
@@ -370,3 +414,23 @@ class TestCloneFailureCleanup:
         assert exc_info.value.status_code == 500
         proxmox.nodes.return_value.qemu.return_value.delete.assert_not_called()
         assert db.query(Vm).count() == 0
+
+
+# ── 클론 실패 메시지 ──────────────────────────────────────────
+
+class TestWaitForCloneMessage:
+
+    def test_failed_task_detail_hides_proxmox_error(self):
+        """Proxmox 오류 원문(스토리지·볼륨 이름 포함 가능)은 사용자 메시지에 넣지 않는다"""
+        proxmox = MagicMock()
+        proxmox.nodes.return_value.tasks.return_value.status.get.return_value = {
+            "status": "stopped",
+            "exitstatus": "clone failed: lvcreate 'extra-ssd/vm-200-disk-0' error",
+        }
+
+        with pytest.raises(HTTPException) as exc_info:
+            _wait_for_clone(proxmox, "test-node", 200, upid="UPID:test")
+
+        assert exc_info.value.status_code == 500
+        assert "extra-ssd" not in exc_info.value.detail
+        assert "lvcreate" not in exc_info.value.detail
