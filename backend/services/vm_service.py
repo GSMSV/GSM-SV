@@ -13,7 +13,7 @@ from proxmoxer.core import ResourceException
 from sqlalchemy import event, text
 from sqlalchemy.orm import Session
 from core.config import settings
-from core.constants import TIER_SPECS
+from core.constants import TIER_SPECS, RESOURCE_USAGE_THRESHOLD_PCT
 from models.vm import Vm
 from models.server import Server
 from models.user import User, UserRole
@@ -402,17 +402,20 @@ def create_vm(
     else:
         raise HTTPException(status_code=400, detail="노드를 선택해주세요.")
 
+    # 클론 후보 스토리지가 설정된 노드는 SSD를 합산이 아니라 스토리지별로 검사한다 (1-2)
+    clone_storages = settings.get_clone_storages(server.name)
+
     # 1-1. 서버 자원 실시간 조회 후 80% 임계값 체크 + 절대 RAM 검증
     from services.mon_service import get_server_resource_usage
     try:
         usage = get_server_resource_usage(server)
-        THRESHOLD = 80.0
+        THRESHOLD = RESOURCE_USAGE_THRESHOLD_PCT
         overloaded = []
         if usage["ram_pct"] >= THRESHOLD:
             overloaded.append(f"RAM {usage['ram_pct']}%")
         if usage["cpu_pct"] >= THRESHOLD:
             overloaded.append(f"CPU {usage['cpu_pct']}%")
-        if usage["disk_pct"] is not None and usage["disk_pct"] >= THRESHOLD:
+        if not clone_storages and usage["disk_pct"] is not None and usage["disk_pct"] >= THRESHOLD:
             overloaded.append(f"SSD {usage['disk_pct']}%")
         if overloaded:
             raise HTTPException(
@@ -428,6 +431,14 @@ def create_vm(
         raise
     except Exception as e:
         logger.warning(f"서버 {server.name} 자원 조회 실패, 체크 건너뜀: {e}")
+
+    # 1-2. 클론 대상 스토리지 선택
+    #      조회 실패도 거절해야 하므로 위의 "체크 건너뜀" 블록 바깥에서,
+    #      VMID·IP·DB 기록을 만들기 전에 호출한다.
+    clone_storage = None
+    if clone_storages:
+        from services.mon_service import select_clone_storage
+        clone_storage = select_clone_storage(server, clone_storages, specs["disk"])
 
     # 2. OS별 템플릿 및 유저명 결정
     from schemas.vm_schema import VMOs
@@ -495,12 +506,16 @@ def create_vm(
 
     try:
         # 5. 템플릿 Full Clone
-        clone_upid = proxmox.nodes(server.name).qemu(template_vmid).clone.post(
-            newid=vmid,
-            name=vm_name,
-            full=1,                     # full clone (linked clone이 아닌 독립 디스크)
-            target=server.name,
-        )
+        clone_params = {
+            "newid": vmid,
+            "name": vm_name,
+            "full": 1,                  # full clone (linked clone이 아닌 독립 디스크)
+            "target": server.name,
+        }
+        if clone_storage:
+            clone_params["storage"] = clone_storage  # 대상 스토리지는 full clone에서만 지정 가능
+        logger.info(f"VM {vmid} 클론 대상 스토리지: {clone_storage or '지정 안 함'}")
+        clone_upid = proxmox.nodes(server.name).qemu(template_vmid).clone.post(**clone_params)
         clone_started = True
 
         # 클론 태스크 완료 + lock 해제 대기
