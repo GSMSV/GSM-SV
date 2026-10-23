@@ -21,6 +21,10 @@
 - 어드민 대시보드 (사용자·VM·서버 관리, 가입 승인)
 - 알림 시스템
 
+## Serverless 데이터베이스 배포
+
+기존 PostgreSQL 데이터를 유지하며 Prisma 마이그레이션으로 전환할 때는 **배포 전에** [Serverless 마이그레이션 절차](serverless/MIGRATIONS.md)의 백업·스키마 검증·일회성 베이스라인을 완료해야 합니다. 신규 DB는 서비스 시작 시 `prisma migrate deploy`가 초기 스키마를 적용합니다.
+
 ## 서비스 도메인
 
 - 웹: `gsmsv.site`
