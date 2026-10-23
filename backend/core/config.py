@@ -95,6 +95,7 @@ class Settings(BaseSettings):
     NODE_1_PASSWORD: str = ""
     NODE_1_SSH_PORT: int = 22
     NODE_1_BASE_PORT: int = 21000
+    NODE_1_CLONE_STORAGES: str = ""                # VM 클론 후보 스토리지 (쉼표 구분, 비우면 Proxmox 기본)
 
     NODE_2_NAME: str = ""
     NODE_2_IP: str = ""
@@ -103,6 +104,7 @@ class Settings(BaseSettings):
     NODE_2_PASSWORD: str = ""
     NODE_2_SSH_PORT: int = 22
     NODE_2_BASE_PORT: int = 22000
+    NODE_2_CLONE_STORAGES: str = ""                # VM 클론 후보 스토리지 (쉼표 구분, 비우면 Proxmox 기본)
 
     NODE_3_NAME: str = ""
     NODE_3_IP: str = ""
@@ -111,6 +113,7 @@ class Settings(BaseSettings):
     NODE_3_PASSWORD: str = ""
     NODE_3_SSH_PORT: int = 22
     NODE_3_BASE_PORT: int = 23000
+    NODE_3_CLONE_STORAGES: str = ""                # VM 클론 후보 스토리지 (쉼표 구분, 비우면 Proxmox 기본)
 
     def get_node_configs(self) -> list[dict]:
         """설정된 노드 목록을 반환 (NAME이 비어있으면 스킵)"""
@@ -135,6 +138,15 @@ class Settings(BaseSettings):
                 "base_port": getattr(self, f"NODE_{i}_BASE_PORT"),
             })
         return nodes
+
+    def get_clone_storages(self, node_name: str) -> list[str]:
+        """노드의 VM 클론 후보 스토리지 목록을 반환 (설정이 없으면 빈 리스트)"""
+        for i in range(1, 4):
+            if node_name and getattr(self, f"NODE_{i}_NAME") == node_name:
+                raw = getattr(self, f"NODE_{i}_CLONE_STORAGES")
+                names = [s.strip() for s in raw.split(",") if s.strip()]
+                return list(dict.fromkeys(names))  # 순서 유지 중복 제거
+        return []
 
     # .env 파일 로딩 설정 (pydantic v2 방식)
     model_config = SettingsConfigDict(

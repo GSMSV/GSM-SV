@@ -8,5 +8,8 @@ TIER_SPECS = {
     VMTier.PROJECT_CUSTOM: {"memory": 16384, "cores": 4, "disk": 40},
 }
 
+# VM 생성 전 노드 자원(RAM·CPU·SSD) 사용률 상한 (%)
+RESOURCE_USAGE_THRESHOLD_PCT = 80.0
+
 AUTO_SNAP_PREFIX = "auto-daily"
 PROVISIONING_UPTIME_THRESHOLD_SECONDS = 180
