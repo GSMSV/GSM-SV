@@ -3,15 +3,17 @@ import { requireAuth } from "../middleware/auth";
 import { assertOwnership } from "../services/functionService";
 import { prisma } from "../db/prisma";
 import { createTrigger, updateTrigger, deleteTrigger } from "../services/triggerService";
+import { redactTrigger } from "../services/triggerAuth";
 
 const router = Router({ mergeParams: true });
+const validMethods = ["ANY", "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
 router.use(requireAuth);
 
 router.get("/", async (req: Request<{ id: string }>, res, next) => {
   try {
     await assertOwnership(req.params.id, req.user!.userId, req.user!.role);
     const triggers = await prisma.trigger.findMany({ where: { functionId: req.params.id } });
-    res.json(triggers);
+    res.json(triggers.map(redactTrigger));
   } catch (err: any) {
     if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });
     next(err);
@@ -24,7 +26,6 @@ router.post("/", async (req: Request<{ id: string }>, res, next) => {
     const { type, httpMethod, cronExpr, enabled } = req.body;
     if (!type || !["http", "cron"].includes(type)) return res.status(400).json({ error: "type은 'http' 또는 'cron'이어야 합니다." });
     if (type === "cron" && !cronExpr) return res.status(400).json({ error: "cron 트리거에는 cronExpr이 필요합니다." });
-    const validMethods = ["ANY", "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
     if (type === "http" && httpMethod && !validMethods.includes(httpMethod)) return res.status(400).json({ error: "유효하지 않은 HTTP 메서드입니다." });
     const trigger = await createTrigger(req.params.id, { type, httpMethod, cronExpr, enabled });
     res.status(201).json(trigger);
@@ -37,7 +38,13 @@ router.post("/", async (req: Request<{ id: string }>, res, next) => {
 router.put("/:tid", async (req: Request<{ id: string; tid: string }>, res, next) => {
   try {
     await assertOwnership(req.params.id, req.user!.userId, req.user!.role);
-    const trigger = await updateTrigger(req.params.tid, req.body);
+    const { httpMethod, cronExpr, enabled } = req.body;
+    if (httpMethod !== undefined && !validMethods.includes(httpMethod)) return res.status(400).json({ error: "유효하지 않은 HTTP 메서드입니다." });
+    const trigger = await updateTrigger(req.params.id, req.params.tid, {
+      ...(httpMethod !== undefined && { httpMethod }),
+      ...(cronExpr !== undefined && { cronExpr }),
+      ...(enabled !== undefined && { enabled }),
+    });
     res.json(trigger);
   } catch (err: any) {
     if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });
@@ -48,7 +55,7 @@ router.put("/:tid", async (req: Request<{ id: string; tid: string }>, res, next)
 router.delete("/:tid", async (req: Request<{ id: string; tid: string }>, res, next) => {
   try {
     await assertOwnership(req.params.id, req.user!.userId, req.user!.role);
-    await deleteTrigger(req.params.tid);
+    await deleteTrigger(req.params.id, req.params.tid);
     res.status(204).send();
   } catch (err: any) {
     if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });

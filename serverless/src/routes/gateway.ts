@@ -1,8 +1,9 @@
 // HTTP 트리거 게이트웨이:
 // 외부에서 fn.gsmsv.site/{ownerId}/{funcName}[/subpath] 으로 요청이 들어오면
 // URL에서 ownerId와 함수 이름을 추출해 DB에서 함수를 조회하고 실행한다.
-// 인증 없이 공개 접근 가능 — 트리거에 httpMethod가 설정된 함수만 호출 가능.
+// Legacy HTTP triggers remain public; new triggers require X-Secret-Token.
 import { Router } from "express";
+import { authorizeHttpTrigger } from "../services/triggerAuth";
 import { prisma } from "../db/prisma";
 import { runFunction } from "../services/executionService";
 
@@ -22,16 +23,20 @@ router.all(/^\/(\d+)\/([^/?#]+)(\/.*)?$/, async (req, res, next) => {
     if (!func || func.status !== "active") return res.status(404).json({ error: "Function not found" });
     if (func.triggers.length === 0) return res.status(404).json({ error: "No HTTP trigger enabled" });
 
-    // httpMethod가 ANY이거나 실제 메서드와 일치하는 트리거만 통과
-    const trigger = func.triggers.find(t => t.httpMethod === "ANY" || t.httpMethod === req.method);
-    if (!trigger) return res.status(405).json({ error: "Method Not Allowed" });
+    const token = req.get("X-Secret-Token");
+    const authorization = authorizeHttpTrigger(func.triggers, req.method, token);
+    if (authorization === "method-not-allowed") return res.status(405).json({ error: "Method Not Allowed" });
+    if (authorization === "unauthorized") return res.status(401).json({ error: "Unauthorized" });
 
+    // Never expose credentials to user code or execution logs.
+    const { "x-secret-token": _token, ...headers } = req.headers;
+    const { secretToken: _queryToken, ...query } = req.query;
     // HTTP 메타데이터(method/headers/query)를 포함해 함수 실행
     // req.body는 express.json() 미들웨어가 파싱한 JSON 객체
     const result = await runFunction(func, req.body || null, "http", {
       method: req.method,
-      headers: req.headers as Record<string, string>,
-      query: req.query as Record<string, string>,
+      headers: headers as Record<string, string>,
+      query: query as Record<string, string>,
     });
 
     // 사용자 handler가 반환한 Response의 status/headers/body를 그대로 응답
