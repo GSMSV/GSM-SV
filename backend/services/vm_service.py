@@ -189,6 +189,56 @@ def _cleanup_vm_db_record(db: Session, vm: Vm) -> None:
         logger.warning(f"VM {vm.hypervisor_vmid} DB 레코드 정리 실패 (수동 확인 필요): {err}")
 
 
+def _cleanup_failed_vm_resources(
+    server: Server,
+    proxmox,
+    vmid: int,
+    internal_ip: str,
+    *,
+    clone_started: bool,
+    iptables_added: bool,
+) -> None:
+    """VM 생성 실패 시 Proxmox VM·iptables·스니펫 정리를 시도합니다. 각 단계 실패는 경고만 남깁니다."""
+    if clone_started:
+        vm_exists = True
+        try:
+            proxmox.nodes(server.name).qemu(vmid).status.current.get()
+        except ResourceException as e:
+            # 클론 실패 시 Proxmox가 이미 지운 경우 — 기다리거나 지울 대상이 없다
+            vm_exists = False
+            logger.info(f"VM {vmid} 생성 실패 — Proxmox에 VM이 없어 삭제 생략 ({e})")
+        except Exception:
+            # 확인 불가 — 남아 있다고 보고 삭제 시도
+            logger.warning(f"VM {vmid} 존재 확인 실패, 삭제를 시도합니다", exc_info=True)
+
+        if vm_exists:
+            try:
+                # lock이 남아있으면 삭제 불가 → lock 해제까지 대기 후 삭제
+                for _ in range(10):
+                    try:
+                        config = proxmox.nodes(server.name).qemu(vmid).config.get()
+                        if config.get("lock"):
+                            logger.info(f"VM {vmid} lock 대기 중 (정리 전)...")
+                            time.sleep(3)
+                            continue
+                    except Exception:
+                        time.sleep(3)
+                        continue
+                    break
+                proxmox.nodes(server.name).qemu(vmid).delete(purge=1)
+            except Exception:
+                logger.warning(f"VM {vmid} 생성 실패 후 정리 중 오류 (수동 확인 필요)")
+    if iptables_added:
+        try:
+            manage_iptables(server, vmid, internal_ip, action="DELETE")
+        except Exception as cleanup_error:
+            logger.warning(f"VM {vmid} 생성 실패 후 iptables 정리 중 오류: {cleanup_error}")
+    try:
+        _delete_snippet(server, f"user-data-{vmid}.yaml")
+    except Exception:
+        pass
+
+
 def _generate_userdata_yaml(password: str, root_password: str = "") -> str:
     """VM별 동적 cloud-init user-data YAML을 생성합니다."""
     return f"""#cloud-config
@@ -596,36 +646,18 @@ def create_vm(
         }
 
     except HTTPException:
+        # 클론 실패·타임아웃(_wait_for_clone)도 Proxmox에 VM이 남지 않도록 정리
+        _cleanup_failed_vm_resources(
+            server, proxmox, vmid, internal_ip,
+            clone_started=clone_started, iptables_added=iptables_added,
+        )
         _cleanup_vm_db_record(db, new_vm)
         raise
     except Exception as e:
-        # 실패 시 생성된 VM + 스니펫 정리 시도
-        if clone_started:
-            try:
-                # lock이 남아있으면 삭제 불가 → lock 해제까지 대기 후 삭제
-                for _ in range(10):
-                    try:
-                        config = proxmox.nodes(server.name).qemu(vmid).config.get()
-                        if config.get("lock"):
-                            logger.info(f"VM {vmid} lock 대기 중 (정리 전)...")
-                            time.sleep(3)
-                            continue
-                    except Exception:
-                        time.sleep(3)
-                        continue
-                    break
-                proxmox.nodes(server.name).qemu(vmid).delete(purge=1)
-            except Exception:
-                logger.warning(f"VM {vmid} 생성 실패 후 정리 중 오류 (수동 확인 필요)")
-        if iptables_added:
-            try:
-                manage_iptables(server, vmid, internal_ip, action="DELETE")
-            except Exception as cleanup_error:
-                logger.warning(f"VM {vmid} 생성 실패 후 iptables 정리 중 오류: {cleanup_error}")
-        try:
-            _delete_snippet(server, f"user-data-{vmid}.yaml")
-        except Exception:
-            pass
+        _cleanup_failed_vm_resources(
+            server, proxmox, vmid, internal_ip,
+            clone_started=clone_started, iptables_added=iptables_added,
+        )
         _cleanup_vm_db_record(db, new_vm)
         logger.error(f"VM 생성 실패: {e}")
         raise HTTPException(
