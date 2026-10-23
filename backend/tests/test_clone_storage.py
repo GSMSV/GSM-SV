@@ -106,9 +106,9 @@ class TestGetCloneStorages:
 
     def test_parses_trims_and_dedupes_in_order(self, monkeypatch):
         monkeypatch.setattr(settings, "NODE_1_NAME", "node-a")
-        monkeypatch.setattr(settings, "NODE_1_CLONE_STORAGES", " node3Ssd2, local-lvm,,node3Ssd2 ")
+        monkeypatch.setattr(settings, "NODE_1_CLONE_STORAGES", " extra-ssd, local-lvm,,extra-ssd ")
 
-        assert settings.get_clone_storages("node-a") == ["node3Ssd2", "local-lvm"]
+        assert settings.get_clone_storages("node-a") == ["extra-ssd", "local-lvm"]
 
     def test_empty_value_returns_empty_list(self, monkeypatch):
         monkeypatch.setattr(settings, "NODE_1_NAME", "node-a")
@@ -132,19 +132,19 @@ class TestSelectCloneStorage:
     def test_picks_largest_avail(self, mock_proxmox_fn):
         mock_proxmox_fn.return_value = _storage_proxmox([
             _storage("local-lvm", total_gib=1000, used_gib=600),  # 400GiB 남음
-            _storage("node3Ssd2", total_gib=1000, used_gib=100),  # 900GiB 남음
+            _storage("extra-ssd", total_gib=1000, used_gib=100),  # 900GiB 남음
         ])
 
-        assert select_clone_storage(SERVER, ["local-lvm", "node3Ssd2"], 20) == "node3Ssd2"
+        assert select_clone_storage(SERVER, ["local-lvm", "extra-ssd"], 20) == "extra-ssd"
 
     @patch("services.mon_service.get_proxmox_for_server")
     def test_tie_prefers_first_candidate(self, mock_proxmox_fn):
         mock_proxmox_fn.return_value = _storage_proxmox([
             _storage("local-lvm", total_gib=1000, used_gib=100),
-            _storage("node3Ssd2", total_gib=1000, used_gib=100),
+            _storage("extra-ssd", total_gib=1000, used_gib=100),
         ])
 
-        assert select_clone_storage(SERVER, ["local-lvm", "node3Ssd2"], 20) == "local-lvm"
+        assert select_clone_storage(SERVER, ["local-lvm", "extra-ssd"], 20) == "local-lvm"
 
     @patch("services.mon_service.get_proxmox_for_server")
     def test_usage_at_threshold_is_excluded_even_with_larger_avail(self, mock_proxmox_fn):
@@ -181,20 +181,20 @@ class TestSelectCloneStorage:
     def test_missing_storage_name_is_skipped(self, mock_proxmox_fn):
         mock_proxmox_fn.return_value = _storage_proxmox([_storage("local-lvm", total_gib=1000, used_gib=100)])
 
-        assert select_clone_storage(SERVER, ["node3Sdd2", "local-lvm"], 20) == "local-lvm"
+        assert select_clone_storage(SERVER, ["extra-sdd", "local-lvm"], 20) == "local-lvm"
 
     @patch("services.mon_service.get_proxmox_for_server")
     def test_no_usable_candidate_raises_507(self, mock_proxmox_fn):
         mock_proxmox_fn.return_value = _storage_proxmox([
             _storage("local-lvm", total_gib=1000, used_gib=810),   # 81%
-            _storage("node3Ssd2", total_gib=100, used_gib=0, avail_gib=10),
+            _storage("extra-ssd", total_gib=100, used_gib=0, avail_gib=10),
         ])
 
         with pytest.raises(HTTPException) as exc_info:
-            select_clone_storage(SERVER, ["local-lvm", "node3Ssd2"], 20)
+            select_clone_storage(SERVER, ["local-lvm", "extra-ssd"], 20)
 
         assert exc_info.value.status_code == 507
-        assert "node3Ssd2" not in exc_info.value.detail
+        assert "extra-ssd" not in exc_info.value.detail
 
     @patch("services.mon_service.get_proxmox_for_server")
     def test_missing_avail_uses_total_minus_used(self, mock_proxmox_fn):
@@ -224,7 +224,7 @@ class TestSelectCloneStorage:
         mock_proxmox_fn.return_value = proxmox
 
         with pytest.raises(HTTPException) as exc_info:
-            select_clone_storage(SERVER, ["node3Ssd2"], 20)
+            select_clone_storage(SERVER, ["extra-ssd"], 20)
 
         assert exc_info.value.status_code == 503
 
@@ -244,13 +244,13 @@ class TestCreateVmCloneStorage:
         proxmox = _make_mock_proxmox(200)
         mock_proxmox_fn.return_value = proxmox
 
-        with patch.object(Settings, "get_clone_storages", return_value=["local-lvm", "node3Ssd2"]), \
-             patch("services.mon_service.select_clone_storage", return_value="node3Ssd2") as mock_select:
+        with patch.object(Settings, "get_clone_storages", return_value=["local-lvm", "extra-ssd"]), \
+             patch("services.mon_service.select_clone_storage", return_value="extra-ssd") as mock_select:
             create_vm(db, user, VMTier.BASIC, node_name="test-node")
 
-        mock_select.assert_called_once_with(server, ["local-lvm", "node3Ssd2"], 20)
+        mock_select.assert_called_once_with(server, ["local-lvm", "extra-ssd"], 20)
         clone_kwargs = proxmox.nodes.return_value.qemu.return_value.clone.post.call_args.kwargs
-        assert clone_kwargs["storage"] == "node3Ssd2"
+        assert clone_kwargs["storage"] == "extra-ssd"
         assert clone_kwargs["full"] == 1
 
     def test_unconfigured_node_clones_without_storage(
@@ -275,8 +275,8 @@ class TestCreateVmCloneStorage:
         usage = {"ram_pct": 10.0, "cpu_pct": 10.0, "disk_pct": 95.0, "free_ram_mb": 99999}
 
         with patch("services.mon_service.get_server_resource_usage", return_value=usage), \
-             patch.object(Settings, "get_clone_storages", return_value=["node3Ssd2"]), \
-             patch("services.mon_service.select_clone_storage", return_value="node3Ssd2"):
+             patch.object(Settings, "get_clone_storages", return_value=["extra-ssd"]), \
+             patch("services.mon_service.select_clone_storage", return_value="extra-ssd"):
             result = create_vm(db, user, VMTier.BASIC, node_name="test-node")
 
         assert result["success"] is True
@@ -304,7 +304,7 @@ class TestCreateVmCloneStorage:
         no_space = HTTPException(status_code=507, detail="선택한 사양의 VM을 만들 SSD 공간이 부족합니다.")
 
         with (
-            patch.object(Settings, "get_clone_storages", return_value=["node3Ssd2"]),
+            patch.object(Settings, "get_clone_storages", return_value=["extra-ssd"]),
             patch("services.mon_service.select_clone_storage", side_effect=no_space),
             pytest.raises(HTTPException) as exc_info,
         ):
@@ -323,8 +323,8 @@ class TestCreateVmCloneStorage:
         db.add(owner)
         db.commit()
 
-        with patch.object(Settings, "get_clone_storages", return_value=["node3Ssd2"]), \
-             patch("services.mon_service.select_clone_storage", return_value="node3Ssd2") as mock_select:
+        with patch.object(Settings, "get_clone_storages", return_value=["extra-ssd"]), \
+             patch("services.mon_service.select_clone_storage", return_value="extra-ssd") as mock_select:
             create_vm(db, owner, VMTier.PROJECT_CUSTOM, node_name="test-node", custom_disk=40)
 
         assert mock_select.call_args.args[2] == 40
