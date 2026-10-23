@@ -204,9 +204,13 @@ def _cleanup_failed_vm_resources(
         try:
             proxmox.nodes(server.name).qemu(vmid).status.current.get()
         except ResourceException as e:
-            # 클론 실패 시 Proxmox가 이미 지운 경우 — 기다리거나 지울 대상이 없다
-            vm_exists = False
-            logger.info(f"VM {vmid} 생성 실패 — Proxmox에 VM이 없어 삭제 생략 ({e})")
+            if "does not exist" in str(e):
+                # 클론 실패 시 Proxmox가 이미 지운 경우 — 기다리거나 지울 대상이 없다
+                vm_exists = False
+                logger.info(f"VM {vmid} 생성 실패 — Proxmox에 VM이 없어 삭제 생략 ({e})")
+            else:
+                # 권한·일시 오류(401/403/5xx 등)는 VM이 없다는 뜻이 아니다 — 삭제 시도
+                logger.warning(f"VM {vmid} 존재 확인 실패 ({e}), 삭제를 시도합니다")
         except Exception:
             # 확인 불가 — 남아 있다고 보고 삭제 시도
             logger.warning(f"VM {vmid} 존재 확인 실패, 삭제를 시도합니다", exc_info=True)
@@ -343,9 +347,11 @@ def _wait_for_clone(proxmox, node_name: str, vmid: int, timeout: int = 120, upid
                 if task_status == "stopped":
                     exit_status = task.get("exitstatus", "")
                     if exit_status != "OK":
+                        # Proxmox 오류 원문에는 스토리지·볼륨 이름이 들어갈 수 있어 로그에만 남긴다
+                        logger.error(f"VM {vmid} 클론 실패: {exit_status}")
                         raise HTTPException(
                             status_code=500,
-                            detail=f"VM {vmid} 클론 실패: {exit_status}",
+                            detail=f"VM {vmid} 클론에 실패했습니다. 잠시 후 다시 시도해주세요.",
                         )
                     break  # 태스크 완료 → lock 해제 대기로 진행
             except HTTPException:
