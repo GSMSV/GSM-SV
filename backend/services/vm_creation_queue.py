@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from core.config import settings
 from core.database import SessionLocal
 from core.timezone import now_kst
+from models.notification import Notification
 from models.server import Server
 from models.user import User, UserRole
 from models.vm import Vm
@@ -183,10 +184,25 @@ def get_vm_creation_job(db: Session, job_id: str, current_user: User) -> VMCreat
     return _serialize_job(job, position=_get_queue_position(db, job))
 
 
+def _commit_job_result(db: Session, job: VmCreationJob, kind: str, message: str) -> None:
+    """상태와 알림을 함께 커밋하되 알림 삽입 실패 시 상태만 커밋한다."""
+    job_id, user_id = job.id, job.user_id
+    # SAVEPOINT 이전에 상태를 flush해야 알림 삽입 오류만 되돌릴 수 있다.
+    db.flush()
+    try:
+        with db.begin_nested():
+            db.add(Notification(user_id=user_id, type=kind, message=message))
+            db.flush()
+    except Exception:
+        logger.exception("[vm-queue] 작업 %s 알림 저장 실패", job_id)
+    db.commit()
+
+
 def process_vm_creation_job(job_id: str) -> None:
     """큐에서 가져온 단일 작업을 처리한다."""
     job_db = SessionLocal()
     work_db = SessionLocal()
+    finalizing = False
     try:
         claimed_at = now_kst()
         claimed_rows = (
@@ -217,9 +233,14 @@ def process_vm_creation_job(job_id: str) -> None:
 
         if job.vmid is not None:
             logger.warning("[vm-queue] 작업 %s에 vmid %s가 이미 설정되어 있음, 중복 생성 방지", job_id, job.vmid)
+            name = job.requested_name or job.vmid
+            node_name = job.node_name
+            vmid = job.vmid
+            message = f"VM '{name}'이(가) 노드 '{node_name}'에 생성되었습니다 (VMID {vmid})."
             job.status = VMCreationJobStatus.COMPLETED.value
             job.finished_at = now_kst()
-            job_db.commit()
+            finalizing = True
+            _commit_job_result(job_db, job, "success", message)
             return
 
         payload = job.payload
@@ -240,28 +261,44 @@ def process_vm_creation_job(job_id: str) -> None:
             purpose=payload.get("purpose"),
         )
 
+        vmid = result.get("vmid")
+        node_name = result.get("assigned_node") or job.node_name
+        name = result.get("name") or job.requested_name or vmid
+        connection_info = ""
+        if result.get("internal_ip"):
+            connection_info += f" 접속 IP: {result['internal_ip']}."
+        if result.get("ssh_user"):
+            connection_info += f" SSH 사용자: {result['ssh_user']}."
+        notification_message = (
+            f"VM '{name}'이(가) 노드 '{node_name}'에 생성되었습니다 (VMID {vmid}).{connection_info}"
+        )
         job.status = VMCreationJobStatus.COMPLETED.value
         job.finished_at = now_kst()
-        job.vmid = result.get("vmid")
-        job.node_name = result.get("assigned_node") or job.node_name
+        job.vmid = vmid
+        job.node_name = node_name
         job.message = result.get("message")
         job.result = result
         job.error_message = None
-        job_db.commit()
-        logger.info("[vm-queue] 작업 완료: %s -> VMID %s", job_id, job.vmid)
+        finalizing = True
+        _commit_job_result(job_db, job, "success", notification_message)
+        logger.info("[vm-queue] 작업 완료: %s -> VMID %s", job_id, vmid)
     except Exception as exc:
+        if finalizing:
+            logger.exception("[vm-queue] 작업 %s 완료 기록 중 오류; 실패 상태로 변경하지 않음", job_id)
+            return
         logger.exception("[vm-queue] 작업 실패: %s", job_id)
         try:
             job_db.rollback()
             job = job_db.query(VmCreationJob).filter(VmCreationJob.id == job_id).first()
             if job:
-                job.status = VMCreationJobStatus.FAILED.value
-                job.finished_at = now_kst()
-                job.error_message = (
+                error_message = (
                     exc.detail if isinstance(exc, HTTPException) else _GENERIC_FAILURE_MESSAGE
                 )
+                job.status = VMCreationJobStatus.FAILED.value
+                job.finished_at = now_kst()
+                job.error_message = error_message
                 job.message = "VM 생성에 실패했습니다."
-                job_db.commit()
+                _commit_job_result(job_db, job, "error", f"VM 생성 실패 — {error_message}")
         except Exception:
             job_db.rollback()
             logger.exception("[vm-queue] 실패 상태 기록 중 오류: %s", job_id)
