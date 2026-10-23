@@ -2,9 +2,9 @@
 
 ## 배경
 
-- gsmgpu3에 SSD를 추가하고 Proxmox에 별도 LVM-Thin 스토리지 `node3Ssd2`로 등록했다 (2026-10-21). 기존 VM 스토리지 `local-lvm`(thin pool `data`)은 거의 찬 상태다
-- 백엔드는 템플릿을 클론할 때 스토리지를 지정하지 않는다 (`backend/services/vm_service.py` `create_vm()`의 `clone.post(newid, name, full=1, target)`). 2026-10-22 테스트에서 콘솔로 만든 VM의 디스크가 `local-lvm`에 생겼다. 새 SSD는 쓰이지 않는다
-- 반면 VM 생성 전 SSD 80% 검사(`get_server_resource_usage`)와 대시보드 표시(`vmcontrol.py`)는 노드의 모든 `lvmthin` 스토리지를 합산한다. 그래서 검사는 낮게 나오는 합산 사용률로 통과하지만, VM은 거의 찬 `local-lvm`에 계속 쌓인다
+- 노드에 SSD를 추가해 Proxmox에 별도 LVM-Thin 스토리지로 등록해도, 백엔드가 그 스토리지를 쓰게 할 방법이 없다
+- 백엔드는 템플릿을 클론할 때 스토리지를 지정하지 않는다 (`backend/services/vm_service.py` `create_vm()`의 `clone.post(newid, name, full=1, target)`). 콘솔로 VM을 만들어 확인해 보면 디스크가 템플릿과 같은 기존 스토리지(`local-lvm`)에 생기고, 새 스토리지는 쓰이지 않는다
+- 반면 VM 생성 전 SSD 80% 검사(`get_server_resource_usage`)와 대시보드 표시(`vmcontrol.py`)는 노드의 모든 `lvmthin` 스토리지를 합산한다. 그래서 새 스토리지를 더하면 합산 사용률이 낮아져 검사는 통과하지만, VM은 여유가 없는 기존 스토리지에 계속 쌓일 수 있다
 
 ## 목표
 
@@ -22,7 +22,7 @@
 
 ## 기능 요구사항
 
-1. `.env`에 노드별 후보 스토리지 목록을 둔다. 예: `NODE_3_CLONE_STORAGES=local-lvm,node3Ssd2`
+1. `.env`에 노드별 후보 스토리지 목록을 둔다. 예: `NODE_3_CLONE_STORAGES=local-lvm,extra-ssd`
 2. 목록이 있는 노드에서 VM을 만들 때, 각 후보를 아래 조건으로 거른다
    - Proxmox가 돌려준 노드 스토리지 목록에 그 이름이 있다
    - `active == 1`이고, `enabled` 값이 있으면 `1`이다
@@ -75,7 +75,7 @@ def select_clone_storage(server: Server, candidates: list[str], required_disk_gb
     ...
 ```
 
-- `proxmox.nodes(server.name).storage.get()`을 한 번 호출한다. 예외가 나면 로그를 남기고 503을 낸다
+- `proxmox.nodes(server.name).storage.get()`을 한 번 호출한다. 예외가 나거나 응답이 리스트가 아니면 로그를 남기고 503을 낸다. 리스트 안의 딕셔너리가 아닌 항목은 무시한다
 - `required_bytes = required_disk_gb * 1024 ** 3`
 - `avail`이 없으면 `total - used`로 계산한다
 - 후보를 목록 순서대로 보고, 조건에 맞지 않는 후보는 이유와 함께 로그를 남긴다. 설정에 있는데 노드에 없는 이름은 설정 오류일 수 있으므로 `logger.error`로 남긴다
@@ -102,7 +102,8 @@ def select_clone_storage(server: Server, candidates: list[str], required_disk_gb
    - `except HTTPException`: 원래 예외를 그대로 다시 던진다 (메시지 유지)
    - `except Exception`: 지금처럼 500 "VM 생성에 실패했습니다. 잠시 후 다시 시도해주세요."
 3. Proxmox VM 삭제는 `clone_started`가 참일 때만 한다. `clone.post`가 성공해 돌아온 뒤에만 참이 되므로, 남의 VM을 지울 일이 없다
-4. 지우기 전에 그 VM이 Proxmox에 아직 있는지 `qemu(vmid).status.current.get()`으로 확인한다. Proxmox API가 오류(`ResourceException`)를 돌려주면 없다고 보고(클론 실패 때 Proxmox가 지운 경우), lock 대기와 삭제를 건너뛰고 info 로그만 남긴다. 연결 오류 같은 다른 예외면 있다고 보고 지금처럼 삭제를 시도한다
+4. 지우기 전에 그 VM이 Proxmox에 아직 있는지 `qemu(vmid).status.current.get()`으로 확인한다. Proxmox API 오류(`ResourceException`)의 내용에 `does not exist`가 있을 때만 없다고 보고(클론 실패 때 Proxmox가 지운 경우), lock 대기와 삭제를 건너뛰고 info 로그만 남긴다. 그 밖의 `ResourceException`(401/403·5xx 같은 권한·일시 오류)과 연결 오류 같은 다른 예외는 확인할 수 없다고 보고 경고 로그를 남긴 뒤 지금처럼 삭제를 시도한다
+   - 이유: proxmoxer는 HTTP 400 이상이면 모두 `ResourceException`을 던진다. 전부 "없음"으로 보면 일시 오류 때 삭제를 건너뛰어 VM이 남는다 (코드 리뷰 반영)
    - `_is_vmid_free_in_proxmox`(클러스터 `nextid` API)는 쓰지 않는다. 기존 테스트 목업은 `nextid`가 항상 "비어 있음"을 돌려주게 되어 있어서, 쓰면 기존 정리 테스트가 깨진다
    - 이유: 없는 VM이면 지금 코드는 `config.get` 실패로 3초씩 10번(30초) 기다린 뒤 삭제에도 실패해 "수동 확인 필요" 경고를 남긴다
 5. lock 대기(3초 × 10번)와 `delete(purge=1)`, 실패 시 "수동 확인 필요" 경고는 지금 동작 그대로다. 클론이 아직 진행 중이라 30초 안에 lock이 풀리지 않으면 삭제에 실패하고 경고가 남는다
@@ -119,9 +120,11 @@ def select_clone_storage(server: Server, candidates: list[str], required_disk_gb
 |---|---|---|---|
 | 노드 스토리지 목록 조회 실패 | 503 | VM 저장 공간 상태를 확인할 수 없습니다. 잠시 후 다시 시도해주세요. | 노드 이름, 예외 |
 | 조건에 맞는 후보 없음 (설정 이름 오타·비활성·80% 이상·남은 용량 부족 포함) | 507 | 선택한 사양의 VM을 만들 SSD 공간이 부족합니다. 관리자에게 문의하세요. | 후보별 탈락 이유, 필요 용량 |
-| 클론 작업 실패·타임아웃 | 기존 처리 | 기존 메시지 | 기존 로그 + 대상 스토리지 |
+| 클론 작업 실패 | 500 | VM {vmid} 클론에 실패했습니다. 잠시 후 다시 시도해주세요. | Proxmox 작업 종료 상태(`exitstatus`) 원문 + 대상 스토리지 |
+| 클론 타임아웃 | 500 | 기존 메시지 (VM {vmid} 클론 타임아웃) | 대상 스토리지 |
 
 - 메시지에는 스토리지 이름과 용량 숫자를 넣지 않는다
+- `_wait_for_clone`은 지금까지 Proxmox `exitstatus` 원문을 사용자 메시지에 담았다. 원문에는 스토리지·볼륨 이름이 들어갈 수 있어서 로그에만 남기고 사용자에게는 일반 문구를 보낸다 (코드 리뷰 반영)
 
 ## 보안
 
@@ -145,7 +148,8 @@ def select_clone_storage(server: Server, candidates: list[str], required_disk_gb
 - `avail`이 필요 용량보다 작으면 제외한다 (20 GB, 40 GB 각각)
 - `active == 0`, `enabled == 0`, `content`에 `images` 없음, 노드에 없는 이름은 제외한다
 - 모두 제외되면 507
-- `storage.get()` 예외면 503
+- `storage.get()` 예외면 503, 응답이 리스트가 아니면(`None`, 딕셔너리, 문자열) 503
+- `avail`이 없으면 `total - used`로 계산해 비교한다
 
 ### `create_vm()`
 
@@ -158,34 +162,39 @@ def select_clone_storage(server: Server, candidates: list[str], required_disk_gb
 
 - 클론 뒤 `_wait_for_clone`이 `HTTPException`(클론 실패·타임아웃)을 던지면: Proxmox VM `delete(purge=1)`를 호출하고, DB 레코드를 지우고, 원래 `HTTPException`이 그대로 올라간다
 - 같은 상황에서 VMID가 Proxmox에 이미 없으면: `delete`를 호출하지 않고 lock 대기도 하지 않는다
+- 존재 확인이 `does not exist`가 아닌 `ResourceException`(503, 401)이나 연결 오류면: 삭제를 시도한다
 - `clone.post` 자체가 실패하면(`clone_started`가 거짓): Proxmox VM `delete`를 호출하지 않는다
 - 클론 뒤 일반 예외(예: iptables 등록 실패)면: 지금처럼 VM·iptables·스니펫을 정리하고 500을 낸다
 
+### 클론 실패 메시지
+
+- `_wait_for_clone`이 실패한 작업의 `exitstatus`(스토리지·볼륨 이름 포함)를 사용자 메시지에 넣지 않는다
+
 ### 큐
 
-- 선택 실패(507) 작업은 `FAILED`가 되고 `error_message`에 메시지가 그대로 들어간다
+- 선택 실패(507) 작업은 `FAILED`가 되고 `error_message`에 메시지가 그대로 들어간다. 기존 `test_vm_lifecycle.py`의 `test_failed_job_keeps_http_exception_detail`이 이미 검증한다
 
 ## 배포 전 확인
 
-1. **클론 시간 측정 (완료).** 2026-10-22에 Proxmox 웹 UI에서 gsmgpu3의 템플릿 1000을 Full Clone, Target Storage `node3Ssd2`로 임시 VMID에 클론했더니 약 2초 걸렸다. 임시 VM은 지웠다. `_wait_for_clone`의 대기 시간 120초는 바꾸지 않는다
+1. **클론 시간 측정 (완료).** Proxmox 웹 UI에서 템플릿을 Full Clone, Target Storage를 새 스토리지로 해서 임시 VMID에 클론해 보니 대기 시간(120초)보다 훨씬 짧게 끝났다. 임시 VM은 지웠다. `_wait_for_clone`의 대기 시간은 바꾸지 않는다
 2. **운영 백엔드가 프로세스 하나인지** 확인한다 (`WEB_CONCURRENCY`가 없거나 1, `--workers` 없음)
-3. 운영 `.env`에 `NODE_3_CLONE_STORAGES=local-lvm,node3Ssd2`를 넣고 백엔드를 재시작한다
-4. 콘솔에서 gsmgpu3에 VM을 하나 만들고, Proxmox Hardware에서 Hard Disk가 `node3Ssd2:vm-…`인지 본다. 확인 뒤 콘솔에서 지운다
+3. 운영 `.env`에 해당 노드의 `NODE_{N}_CLONE_STORAGES`(기존 스토리지와 새 스토리지)를 넣고 백엔드를 재시작한다
+4. 콘솔에서 gsmgpu3에 VM을 하나 만들고, Proxmox Hardware에서 Hard Disk가 새 스토리지 이름으로 시작하는지(`{스토리지}:vm-…`) 본다. 확인 뒤 콘솔에서 지운다
 5. 이전 테스트로 만든 VM은 콘솔에서 지운다
 
 ## 알려진 위험
 
-- 클론 실패·타임아웃 때 Proxmox에 VM이 남던 기존 문제는 이번 범위에서 고친다 (「실패 정리」). 다만 클론이 진행 중인 채로 타임아웃이 나서 30초 안에 lock이 풀리지 않으면 여전히 남을 수 있다. 이때는 "수동 확인 필요" 경고 로그가 남는다
+- 클론 실패·타임아웃 때 Proxmox에 VM이 남던 기존 문제는 이번 범위에서 고친다 (「실패 정리」). 다만 클론이 진행 중인 채로 타임아웃이 나서 30초 안에 lock이 풀리지 않으면 여전히 남을 수 있다. 이때는 "수동 확인 필요" 경고 로그가 남는다. 클론 작업 중지나 관리자 알림으로 보완하는 일은 별도 이슈로 다룬다 (코드 리뷰 반영)
 - 대시보드는 합산이라 여유가 있어 보여도, 스토리지마다 따로 판단하므로 생성이 거절될 수 있다
 
 ## 되돌리기
 
-- `.env`의 `NODE_3_CLONE_STORAGES`를 지우거나 비우고 재시작하면 예전 동작으로 돌아간다
-- 이미 `node3Ssd2`에 만든 VM은 그대로 동작한다. 시작·정지·삭제·스냅샷은 VM 설정에 적힌 스토리지를 Proxmox가 따라가므로 백엔드 변경이 필요 없다
+- `.env`의 `NODE_{N}_CLONE_STORAGES`를 지우거나 비우고 재시작하면 예전 동작으로 돌아간다
+- 이미 새 스토리지에 만든 VM은 그대로 동작한다. 시작·정지·삭제·스냅샷은 VM 설정에 적힌 스토리지를 Proxmox가 따라가므로 백엔드 변경이 필요 없다
 
 ## 범위 밖
 
 - 대시보드에 스토리지별 표시
-- 기존 VM 디스크를 `node3Ssd2`로 옮기기
+- 기존 VM 디스크를 새 스토리지로 옮기기
 - gsmgpu1·2 설정
 - 생성 후 디스크 크기 변경 기능 (지금은 CPU·RAM만 바꿀 수 있다)
