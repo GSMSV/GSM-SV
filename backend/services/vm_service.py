@@ -13,7 +13,7 @@ from proxmoxer.core import ResourceException
 from sqlalchemy import event, text
 from sqlalchemy.orm import Session
 from core.config import settings
-from core.constants import TIER_SPECS
+from core.constants import TIER_SPECS, RESOURCE_USAGE_THRESHOLD_PCT
 from models.vm import Vm
 from models.server import Server
 from models.user import User, UserRole
@@ -189,6 +189,60 @@ def _cleanup_vm_db_record(db: Session, vm: Vm) -> None:
         logger.warning(f"VM {vm.hypervisor_vmid} DB 레코드 정리 실패 (수동 확인 필요): {err}")
 
 
+def _cleanup_failed_vm_resources(
+    server: Server,
+    proxmox,
+    vmid: int,
+    internal_ip: str,
+    *,
+    clone_started: bool,
+    iptables_added: bool,
+) -> None:
+    """VM 생성 실패 시 Proxmox VM·iptables·스니펫 정리를 시도합니다. 각 단계 실패는 경고만 남깁니다."""
+    if clone_started:
+        vm_exists = True
+        try:
+            proxmox.nodes(server.name).qemu(vmid).status.current.get()
+        except ResourceException as e:
+            if "does not exist" in str(e):
+                # 클론 실패 시 Proxmox가 이미 지운 경우 — 기다리거나 지울 대상이 없다
+                vm_exists = False
+                logger.info(f"VM {vmid} 생성 실패 — Proxmox에 VM이 없어 삭제 생략 ({e})")
+            else:
+                # 권한·일시 오류(401/403/5xx 등)는 VM이 없다는 뜻이 아니다 — 삭제 시도
+                logger.warning(f"VM {vmid} 존재 확인 실패 ({e}), 삭제를 시도합니다")
+        except Exception:
+            # 확인 불가 — 남아 있다고 보고 삭제 시도
+            logger.warning(f"VM {vmid} 존재 확인 실패, 삭제를 시도합니다", exc_info=True)
+
+        if vm_exists:
+            try:
+                # lock이 남아있으면 삭제 불가 → lock 해제까지 대기 후 삭제
+                for _ in range(10):
+                    try:
+                        config = proxmox.nodes(server.name).qemu(vmid).config.get()
+                        if config.get("lock"):
+                            logger.info(f"VM {vmid} lock 대기 중 (정리 전)...")
+                            time.sleep(3)
+                            continue
+                    except Exception:
+                        time.sleep(3)
+                        continue
+                    break
+                proxmox.nodes(server.name).qemu(vmid).delete(purge=1)
+            except Exception:
+                logger.warning(f"VM {vmid} 생성 실패 후 정리 중 오류 (수동 확인 필요)")
+    if iptables_added:
+        try:
+            manage_iptables(server, vmid, internal_ip, action="DELETE")
+        except Exception as cleanup_error:
+            logger.warning(f"VM {vmid} 생성 실패 후 iptables 정리 중 오류: {cleanup_error}")
+    try:
+        _delete_snippet(server, f"user-data-{vmid}.yaml")
+    except Exception:
+        pass
+
+
 def _generate_userdata_yaml(password: str, root_password: str = "") -> str:
     """VM별 동적 cloud-init user-data YAML을 생성합니다."""
     return f"""#cloud-config
@@ -293,9 +347,11 @@ def _wait_for_clone(proxmox, node_name: str, vmid: int, timeout: int = 120, upid
                 if task_status == "stopped":
                     exit_status = task.get("exitstatus", "")
                     if exit_status != "OK":
+                        # Proxmox 오류 원문에는 스토리지·볼륨 이름이 들어갈 수 있어 로그에만 남긴다
+                        logger.error(f"VM {vmid} 클론 실패: {exit_status}")
                         raise HTTPException(
                             status_code=500,
-                            detail=f"VM {vmid} 클론 실패: {exit_status}",
+                            detail=f"VM {vmid} 클론에 실패했습니다. 잠시 후 다시 시도해주세요.",
                         )
                     break  # 태스크 완료 → lock 해제 대기로 진행
             except HTTPException:
@@ -402,17 +458,20 @@ def create_vm(
     else:
         raise HTTPException(status_code=400, detail="노드를 선택해주세요.")
 
+    # 클론 후보 스토리지가 설정된 노드는 SSD를 합산이 아니라 스토리지별로 검사한다 (1-2)
+    clone_storages = settings.get_clone_storages(server.name)
+
     # 1-1. 서버 자원 실시간 조회 후 80% 임계값 체크 + 절대 RAM 검증
     from services.mon_service import get_server_resource_usage
     try:
         usage = get_server_resource_usage(server)
-        THRESHOLD = 80.0
+        THRESHOLD = RESOURCE_USAGE_THRESHOLD_PCT
         overloaded = []
         if usage["ram_pct"] >= THRESHOLD:
             overloaded.append(f"RAM {usage['ram_pct']}%")
         if usage["cpu_pct"] >= THRESHOLD:
             overloaded.append(f"CPU {usage['cpu_pct']}%")
-        if usage["disk_pct"] is not None and usage["disk_pct"] >= THRESHOLD:
+        if not clone_storages and usage["disk_pct"] is not None and usage["disk_pct"] >= THRESHOLD:
             overloaded.append(f"SSD {usage['disk_pct']}%")
         if overloaded:
             raise HTTPException(
@@ -428,6 +487,14 @@ def create_vm(
         raise
     except Exception as e:
         logger.warning(f"서버 {server.name} 자원 조회 실패, 체크 건너뜀: {e}")
+
+    # 1-2. 클론 대상 스토리지 선택
+    #      조회 실패도 거절해야 하므로 위의 "체크 건너뜀" 블록 바깥에서,
+    #      VMID·IP·DB 기록을 만들기 전에 호출한다.
+    clone_storage = None
+    if clone_storages:
+        from services.mon_service import select_clone_storage
+        clone_storage = select_clone_storage(server, clone_storages, specs["disk"])
 
     # 2. OS별 템플릿 및 유저명 결정
     from schemas.vm_schema import VMOs
@@ -495,12 +562,16 @@ def create_vm(
 
     try:
         # 5. 템플릿 Full Clone
-        clone_upid = proxmox.nodes(server.name).qemu(template_vmid).clone.post(
-            newid=vmid,
-            name=vm_name,
-            full=1,                     # full clone (linked clone이 아닌 독립 디스크)
-            target=server.name,
-        )
+        clone_params = {
+            "newid": vmid,
+            "name": vm_name,
+            "full": 1,                  # full clone (linked clone이 아닌 독립 디스크)
+            "target": server.name,
+        }
+        if clone_storage:
+            clone_params["storage"] = clone_storage  # 대상 스토리지는 full clone에서만 지정 가능
+        logger.info(f"VM {vmid} 클론 대상 스토리지: {clone_storage or '지정 안 함'}")
+        clone_upid = proxmox.nodes(server.name).qemu(template_vmid).clone.post(**clone_params)
         clone_started = True
 
         # 클론 태스크 완료 + lock 해제 대기
@@ -581,36 +652,18 @@ def create_vm(
         }
 
     except HTTPException:
+        # 클론 실패·타임아웃(_wait_for_clone)도 Proxmox에 VM이 남지 않도록 정리
+        _cleanup_failed_vm_resources(
+            server, proxmox, vmid, internal_ip,
+            clone_started=clone_started, iptables_added=iptables_added,
+        )
         _cleanup_vm_db_record(db, new_vm)
         raise
     except Exception as e:
-        # 실패 시 생성된 VM + 스니펫 정리 시도
-        if clone_started:
-            try:
-                # lock이 남아있으면 삭제 불가 → lock 해제까지 대기 후 삭제
-                for _ in range(10):
-                    try:
-                        config = proxmox.nodes(server.name).qemu(vmid).config.get()
-                        if config.get("lock"):
-                            logger.info(f"VM {vmid} lock 대기 중 (정리 전)...")
-                            time.sleep(3)
-                            continue
-                    except Exception:
-                        time.sleep(3)
-                        continue
-                    break
-                proxmox.nodes(server.name).qemu(vmid).delete(purge=1)
-            except Exception:
-                logger.warning(f"VM {vmid} 생성 실패 후 정리 중 오류 (수동 확인 필요)")
-        if iptables_added:
-            try:
-                manage_iptables(server, vmid, internal_ip, action="DELETE")
-            except Exception as cleanup_error:
-                logger.warning(f"VM {vmid} 생성 실패 후 iptables 정리 중 오류: {cleanup_error}")
-        try:
-            _delete_snippet(server, f"user-data-{vmid}.yaml")
-        except Exception:
-            pass
+        _cleanup_failed_vm_resources(
+            server, proxmox, vmid, internal_ip,
+            clone_started=clone_started, iptables_added=iptables_added,
+        )
         _cleanup_vm_db_record(db, new_vm)
         logger.error(f"VM 생성 실패: {e}")
         raise HTTPException(
